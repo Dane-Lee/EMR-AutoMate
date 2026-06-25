@@ -1,0 +1,3 @@
+employee,date,encounter_type,department,division,category,shift,coaching_type,details,description,what_prompted
+"Smith, Jane",06/23/2026,In Person,,,,,Health/Wellness Coaching,Hydration; Stress,"Discussed hydration habits and stress from a recent schedule change; gave a water-intake target.",Employee Inquiry
+"Doe, John",,Via Phone or Microsoft Teams,,,,,Safety Coaching,PPE Use,Reviewed correct glove selection for the task.,Specialist Initiated
