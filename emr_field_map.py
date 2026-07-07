@@ -153,9 +153,52 @@ def department_for(area_text):
     return ""
 
 
+# Roles whose Department IS the role name; their Division comes from the line/area they
+# lead or supervise (Dane 2026-07-07: e.g. "line lead, weld" -> Line Lead / Weld;
+# "supervisor, weld" -> Supervisor / Weld). If no line is named, fall back to the role's
+# default division below.
+_ROLE_PATTERNS = [
+    (r"\bsupervisor\b", "Supervisor"),
+    (r"line\s*lead|team\s*lead", "Line Lead"),
+]
+_ROLE_DEFAULT_DIVISION = {"Line Lead": "Assembly", "Supervisor": "Admin/Office"}
+
+# Keywords that name a Division directly (used to give a lead/supervisor their Division).
+_DIVISION_KEYWORDS = [
+    (r"\bweld", "Weld"),
+    (r"assembly|\bassy\b", "Assembly"),
+    (r"paint", "Paint Line"),
+    (r"machine|\bmach\b", "Machine Operator"),
+    (r"maintenance", "Maintenance"),
+    (r"\bquality\b|\bqa\b", "Quality"),
+    (r"material", "Material Handler"),
+    (r"admin|office", "Admin/Office"),
+]
+
+
+def _division_keyword(text):
+    for pat, div in _DIVISION_KEYWORDS:
+        if re.search(pat, text):
+            return div
+    return ""
+
+
 def resolve(area_text):
-    """area text -> (department, division). Either may be '' if unknown."""
-    dept = department_for(area_text)
+    """area text -> (department, division). Either may be '' if unknown.
+
+    Leads/supervisors resolve to Department=role, Division=the line they're on: the
+    Division is taken from a division keyword in the text ("line lead, weld" -> Weld),
+    then from resolving the rest of the text, then the role's default division.
+    """
+    t = (area_text or "").lower()
+    for pat, role in _ROLE_PATTERNS:
+        if re.search(pat, t):
+            div = _division_keyword(t)
+            if not div:
+                rest = re.sub(r"line\s*lead|team\s*lead|supervisor", " ", t)
+                div = division_for(department_for(rest))
+            return role, div or _ROLE_DEFAULT_DIVISION.get(role, "")
+    dept = department_for(t)
     return dept, division_for(dept)
 
 
