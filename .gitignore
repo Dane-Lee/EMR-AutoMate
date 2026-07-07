@@ -14,6 +14,11 @@ gender_review_needed.csv
 nickname_candidates.csv
 identifier_shortened.csv
 emr_not_in_roster.csv
+# Roster rows not found in the EMR (new-hire worklist, PII) + targeted re-run sheet
+roster_not_in_emr.csv
+roster_rerun.xlsx
+# Identifier-cleanup fix sheet (truncated IDs to re-push, PII)
+roster_idfix.xlsx
 # Running log of newly-composed encounter descriptions (to merge into the worksheet)
 new_descriptions_for_library.csv
 # Real employee data / notes dropped into the project folder (PII / PHI)

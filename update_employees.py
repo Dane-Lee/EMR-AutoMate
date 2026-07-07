@@ -72,15 +72,20 @@ GENDER_REVIEW_CSV = os.path.join(_HERE, "gender_review_needed.csv")
 # Employees whose first name commonly has a nickname (for the First "Nick" treatment).
 NICKNAME_CSV = os.path.join(_HERE, "nickname_candidates.csv")
 
-# The EMR Identifier box has NO client maxlength, but the server may cap the length.
-# Once a cap is known, set MAX_IDENTIFIER_LEN and the importer will shorten the TITLE
-# part (keeping ID + shift intact) to fit, logging each change to
-# identifier_shortened.csv for Dane to review. None = always write the full value.
-MAX_IDENTIFIER_LEN = None
+# The EMR Identifier box has NO client maxlength, but the SERVER silently truncates on
+# save (confirmed 2026-07-07: a 58-char value came back cut off). The importer shortens
+# the TITLE part (keeping ID + shift intact) to fit, logging each change to
+# identifier_shortened.csv so Dane can swap the auto-trim for a proper abbreviation
+# (e.g. '...EHS Manager...'). None = always write the full value.
+MAX_IDENTIFIER_LEN = 30
 IDENTIFIER_SHORTENED_CSV = os.path.join(_HERE, "identifier_shortened.csv")
 
 # EMR employees that no active-roster row matched (i.e. not in the roster file).
 EMR_NOT_IN_ROSTER_CSV = os.path.join(_HERE, "emr_not_in_roster.csv")
+
+# Roster rows that matched NO one in the EMR — the "add these manually" worklist
+# (genuinely-new hires), separated from ambiguous rows that ARE in the EMR.
+ROSTER_NOT_IN_EMR_CSV = os.path.join(_HERE, "roster_not_in_emr.csv")
 
 # ─────────────────────────────────────────────
 # ROSTER COLUMN / FIELD SPEC
@@ -142,6 +147,26 @@ def normalize_name(s):
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"\s*,\s*", ", ", s)
     return s
+
+
+# Generational suffixes stripped for loose matching (as whole words, optional dot).
+_SUFFIX_RE = re.compile(r"\b(?:jr|sr|ii|iii|iv|v)\b\.?", re.IGNORECASE)
+
+
+def loose_name(s):
+    """A forgiving normalization for the *fallback* name match.
+
+    The EMR stores names with embedded nicknames and suffixes that a roster's plain
+    'Last, First' won't equal, e.g. 'Skelton, Wilma "Sissy"', 'Larie Jr., William',
+    'Rex, Thomas "Tom"'. This strips quoted nicknames and generational suffixes so
+    those still resolve. Paired quotes only — a lone apostrophe (O'Brien) is left
+    intact. Used only after Identifier and exact-name matching have missed.
+    """
+    s = str(s or "")
+    s = re.sub(r'"[^"]*"', " ", s)          # drop "Nick"
+    s = re.sub(r"'[^']*'", " ", s)          # drop 'Nick' (needs a matching pair)
+    s = _SUFFIX_RE.sub(" ", s)              # drop Jr/Sr/II/III/IV/V
+    return normalize_name(s)
 
 
 def norm_identifier(s):
@@ -308,24 +333,77 @@ def _position_title(position):
     return s.split(" - ", 1)[1].strip() if " - " in s else s
 
 
+# Word/phrase abbreviations used to shrink a job TITLE so the 'ID-Title-Shift'
+# identifier fits MAX_IDENTIFIER_LEN cleanly (instead of a mid-word truncation).
+# Applied only when the full identifier is over the cap. Multi-word phrases first,
+# then single words; matched whole-word and case-insensitively. Roman-numeral level
+# suffixes (I/II/III) are left intact. Extend as new long titles appear.
+_TITLE_ABBREVIATIONS = [
+    ("environmental health & safety", "EHS"),
+    ("environmental health and safety", "EHS"),
+    ("continuous improvement", "CI"),
+    ("human resources", "HR"),
+    ("information technology", "IT"),
+    ("quality assurance", "QA"),
+    ("representative", "Rep"),
+    ("coordinator", "Coord"),
+    ("administrator", "Admin"),
+    ("manufacturing", "Mfg"),
+    ("engineering", "Eng"),
+    ("engineer", "Engr"),
+    ("maintenance", "Maint"),
+    ("production", "Prod"),
+    ("supervisor", "Supv"),
+    ("associate", "Assoc"),
+    ("assistant", "Asst"),
+    ("specialist", "Spec"),
+    ("technician", "Tech"),
+    ("operator", "Op"),
+    ("manager", "Mgr"),
+    ("director", "Dir"),
+    ("senior", "Sr"),
+    ("junior", "Jr"),
+]
+
+
+def abbreviate_title(title):
+    """Apply _TITLE_ABBREVIATIONS to a job title (whole-word, case-insensitive),
+    collapsing any doubled spaces the substitutions leave behind."""
+    out = str(title or "")
+    for phrase, abbr in _TITLE_ABBREVIATIONS:
+        out = re.sub(rf"\b{re.escape(phrase)}\b", abbr, out, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", out).strip()
+
+
 def format_identifier(associate_id, position, shift, maxlen=None):
     """Build 'ID-Title-Shift', e.g. '12345-Technician II-2nd' (per Dane's spec).
 
-    If `maxlen` is set and the full value is too long, trim the TITLE (keeping the ID
-    and shift intact) so the whole thing fits. Returns (value, was_shortened).
+    If `maxlen` is set and the full value is too long, first abbreviate the TITLE
+    (e.g. 'Production Supervisor' -> 'Prod Supv'); only if it's *still* too long do we
+    hard-trim the title. The ID and shift are always kept intact. Returns
+    (value, was_shortened).
     """
     aid = str(associate_id).strip()
     title = _position_title(position)
     sh = _shift_ordinal(shift)
-    full = "-".join(p for p in [aid, title, sh] if p)
+
+    def compose(t):
+        return "-".join(p for p in [aid, t, sh] if p)
+
+    full = compose(title)
     if not maxlen or len(full) <= maxlen:
         return full, False
-    # Room left for the title after the ID, the shift, and the joining dashes.
+
+    # 1) Abbreviate the title; that alone usually gets us under the cap.
+    title = abbreviate_title(title)
+    if len(compose(title)) <= maxlen:
+        return compose(title), True
+
+    # 2) Still too long — hard-trim the (abbreviated) title as a last resort.
     overhead = len(aid) + (1 + len(sh) if sh else 0) + (1 if title else 0)
     avail = maxlen - overhead
     title = title[:avail].rstrip() if avail > 0 else ""
-    shortened = "-".join(p for p in [aid, title, sh] if p)
-    return shortened, True
+    return compose(title), True
 
 
 def _hc_id_str(aid):
@@ -452,12 +530,14 @@ def build_index(people):
     Returns {by_identifier: {norm_id: uuid}, by_name: {norm_name: [uuids]},
              people: [...]}.
     """
-    by_identifier, by_name = {}, {}
+    by_identifier, by_name, by_name_loose = {}, {}, {}
     for p in people:
         if p["identifier"]:
             by_identifier[norm_identifier(p["identifier"])] = p["uuid"]
         by_name.setdefault(normalize_name(p["name"]), []).append(p["uuid"])
-    return {"by_identifier": by_identifier, "by_name": by_name, "people": people}
+        by_name_loose.setdefault(loose_name(p["name"]), []).append(p["uuid"])
+    return {"by_identifier": by_identifier, "by_name": by_name,
+            "by_name_loose": by_name_loose, "people": people}
 
 
 def resolve_employee(row, index):
@@ -475,6 +555,18 @@ def resolve_employee(row, index):
         uuids = index["by_name"].get(name, [])
         if len(uuids) == 1:
             return uuids[0], "name"
+        if len(uuids) > 1:
+            return None, f"ambiguous name — {len(uuids)} employees match '{row.get('name')}'"
+
+    # Fallback: forgiving match that ignores EMR nicknames/suffixes (e.g. the roster's
+    # 'Skelton, Wilma' vs the EMR's 'Skelton, Wilma "Sissy"'). Only accept a unique hit.
+    loose = loose_name(row.get("name"))
+    if loose:
+        uuids = index.get("by_name_loose", {}).get(loose, [])
+        # Distinct UUIDs only (an exact + loose key can point at the same person).
+        uuids = list(dict.fromkeys(uuids))
+        if len(uuids) == 1:
+            return uuids[0], "name (loose)"
         if len(uuids) > 1:
             return None, f"ambiguous name — {len(uuids)} employees match '{row.get('name')}'"
 
@@ -1033,6 +1125,25 @@ async def run():
             print(f"\nMatched {len(resolved)}, unmatched {len(unmatched)}.")
             for row, label, info in unmatched:
                 print(f"  skip: {label} — {info}")
+
+            # Split the unmatched into the two piles Dane cares about:
+            #   • "not in EMR" → genuinely-new hires to ADD manually.
+            #   • "ambiguous"  → already in the EMR, just need a badge to disambiguate.
+            new_hires = [(r, l) for r, l, info in unmatched if info.startswith("no match")]
+            ambiguous = [(r, l, info) for r, l, info in unmatched
+                         if info.startswith("ambiguous")]
+            with open(ROSTER_NOT_IN_EMR_CSV, "w", newline="", encoding="utf-8-sig") as rf:
+                rw = csv.writer(rf)
+                rw.writerow(["name", "identifier", "date_of_hire", "reason"])
+                for r, l in new_hires:
+                    rw.writerow([r.get("name", ""), r.get("identifier", ""),
+                                 r.get("date_of_hire", ""), "not in EMR — add manually"])
+                for r, l, info in ambiguous:
+                    rw.writerow([r.get("name", ""), r.get("identifier", ""),
+                                 r.get("date_of_hire", ""),
+                                 "ambiguous — in EMR, set the badge to disambiguate"])
+            print(f"  → {len(new_hires)} new hire(s) to add manually, "
+                  f"{len(ambiguous)} ambiguous — see {ROSTER_NOT_IN_EMR_CSV}")
 
             if not resolved:
                 popup("No roster rows matched an employee in this worksite. "
