@@ -69,6 +69,10 @@ LOG_CSV = os.path.join(_HERE, "employee_updates_log.csv")
 # Employees whose Gender was blank and got defaulted to "Male" — review afterward.
 GENDER_REVIEW_CSV = os.path.join(_HERE, "gender_review_needed.csv")
 
+# Employees whose Date of Hire could not be made to persist (calendar-picker bind
+# failure) even after retries — for manual entry.
+DATE_NOT_PERSISTED_CSV = os.path.join(_HERE, "date_not_persisted.csv")
+
 # Employees whose first name commonly has a nickname (for the First "Nick" treatment).
 NICKNAME_CSV = os.path.join(_HERE, "nickname_candidates.csv")
 
@@ -728,6 +732,30 @@ _MONTH_ABBR = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun",
      "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
 
+# The Date of Hire input (also used to re-read the saved value for verification).
+DOH_SELECTOR = "input[placeholder='Date of Hire']"
+
+# The EMR shows dates as 'Apr 05 2022'; the roster uses 'MM/DD/YYYY'. Compare by
+# parsing both to an actual date so display formatting can't cause a false mismatch.
+_DATE_FORMATS = ("%m/%d/%Y", "%b %d %Y", "%B %d %Y", "%b %d, %Y",
+                 "%B %d, %Y", "%m-%d-%Y", "%Y-%m-%d")
+
+
+def _parse_date(s):
+    s = str(s or "").strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _same_date(a, b):
+    """True iff a and b denote the same calendar date (format-agnostic)."""
+    da, db = _parse_date(a), _parse_date(b)
+    return da is not None and da == db
+
 
 async def _set_date(page: Page, selector: str, value: str, original: str = "") -> bool:
     """Set the Date of Hire field. The input won't accept typing — clicking it opens an
@@ -785,11 +813,17 @@ async def _set_date(page: Page, selector: str, value: str, original: str = "") -
 
             await cell.first.click(timeout=4000)
             await page.wait_for_timeout(150)
+            # Commit the selection: the footer OK button is what binds the value into
+            # the form. Clicking the day cell alone can update the display but not the
+            # underlying value, which is why dates looked set but didn't save.
             apply_btn = cal.locator(".btn-primary.calendar-btn")
             if await apply_btn.count() > 0:
                 await apply_btn.first.click()
+            else:
+                print("  (no calendar OK button found — selection may not bind)")
             await page.wait_for_timeout(250)
-            if (await inp.input_value()).strip():
+            # Success only if the input now shows the TARGET date (not merely non-empty).
+            if _same_date(await inp.input_value(), value):
                 return True
         except Exception as e:
             print(f"  (date attempt {attempt + 1} failed: {str(e).splitlines()[0]})")
@@ -800,6 +834,32 @@ async def _set_date(page: Page, selector: str, value: str, original: str = "") -
 
     print(f"  WARNING: couldn't set date to {value} — left as '{original or 'unchanged'}'.")
     return False
+
+
+async def commit_date_of_hire(page: Page, uuid: str, expected: str) -> tuple:
+    """Ensure the Date of Hire actually PERSISTED, re-setting + re-saving if needed.
+
+    The rc-calendar can show a value in the input without binding it into the form, so
+    a plain save silently drops it. This re-opens the saved record, checks the stored
+    Date of Hire, and if it doesn't match, re-picks the date and saves again (up to a
+    few tries). Returns (persisted: bool, actual_value: str). Leaves the edit form open.
+    """
+    for attempt in range(3):
+        if not await open_edit_form(page, uuid):
+            return False, ""  # couldn't reload (session?) — caller logs the miss
+        actual = await _read_text(page, DOH_SELECTOR)
+        if _same_date(actual, expected):
+            return True, actual
+        # Didn't stick — pick it again on this freshly-loaded form and re-save.
+        print(f"  Date of Hire not persisted (shows '{actual or 'blank'}') — "
+              f"re-applying {expected} (try {attempt + 1}/3)")
+        await _set_date(page, DOH_SELECTOR, expected)
+        await save_employee(page)
+    # Final check after the last re-save.
+    if await open_edit_form(page, uuid):
+        actual = await _read_text(page, DOH_SELECTOR)
+        return _same_date(actual, expected), actual
+    return False, ""
 
 
 async def fill_employee_form(page: Page, row: dict):
@@ -1029,29 +1089,33 @@ async def run_capture_datepicker(target_name=None):
 # MAIN UPDATE RUN
 # ─────────────────────────────────────────────
 
-def prepare_roster():
-    """Load + validate roster.xlsx before the browser opens.
+def prepare_roster(path=None):
+    """Load + validate the roster spreadsheet before the browser opens.
 
+    `path` defaults to roster.xlsx next to the script; pass one (via --roster) to run a
+    targeted sheet (e.g. a Date-of-Hire-only fix sheet) without swapping files.
     Returns the list of rows, or raises SystemExit if missing/empty/invalid.
     """
-    if not os.path.exists(ROSTER_XLSX):
-        print(f"No roster.xlsx found next to the script ({ROSTER_XLSX}).")
+    path = path or ROSTER_XLSX
+    name = os.path.basename(path)
+    if not os.path.exists(path):
+        print(f"No roster file found at {path}.")
         print("Create one from roster_template.xlsx (see ROSTER_UPDATE_PROMPT.md).")
         raise SystemExit(1)
 
-    rows, errors, warnings = load_roster_xlsx(ROSTER_XLSX)
+    rows, errors, warnings = load_roster_xlsx(path)
     for w in warnings:
         print(f"  note: {w}")
     if not rows:
-        print("roster.xlsx has no data rows.")
+        print(f"{name} has no data rows.")
         raise SystemExit(1)
     if errors:
-        print(f"\n⚠ Fix these problems in roster.xlsx before running ({len(errors)}):")
+        print(f"\n⚠ Fix these problems in {name} before running ({len(errors)}):")
         for e in errors:
             print(f"   - {e}")
         raise SystemExit(1)
 
-    print(f"\nLoaded {len(rows)} employee row(s) from roster.xlsx.")
+    print(f"\nLoaded {len(rows)} employee row(s) from {name}.")
     return rows
 
 
@@ -1101,9 +1165,13 @@ async def open_edit_form(page: Page, uuid: str) -> bool:
     return False
 
 
-async def run():
-    """Entry point for the employee-update flow (called by emr_automate.py)."""
-    rows = prepare_roster()  # validates before opening anything
+async def run(roster_path=None):
+    """Entry point for the employee-update flow (called by emr_automate.py).
+
+    `roster_path` (from --roster) lets a targeted sheet drive the run; defaults to
+    roster.xlsx.
+    """
+    rows = prepare_roster(roster_path)  # validates before opening anything
 
     async with async_playwright() as p:
         context, page = await _open_browser(p)
@@ -1161,6 +1229,7 @@ async def run():
 
             updated = errored = 0
             gender_review = []  # (label, uuid) for records we defaulted to Male
+            date_misses = []    # (label, expected, actual) where DoH wouldn't persist
             for i, (row, uuid, matched_by) in enumerate(resolved, 1):
                 label = row.get("name") or row.get("identifier") or uuid
                 print(f"\n══ {i}/{len(resolved)}: {label}  (matched by {matched_by}) ══")
@@ -1183,6 +1252,22 @@ async def run():
                     await snap(page, f"EMP_filled_{i:03d}")
 
                     saved = await save_employee(page)
+
+                    # The Date of Hire uses a calendar picker that can look set without
+                    # binding, so verify it actually persisted and re-apply if not. The
+                    # audit log then reflects the VERIFIED value, never an optimistic one.
+                    doh = row.get("date_of_hire", "")
+                    if saved and doh and any(c[0] == "Date of Hire" for c in changes):
+                        persisted, actual = await commit_date_of_hire(page, uuid, doh)
+                        changes = [(l, o, n, (persisted if l == "Date of Hire" else ok))
+                                   for (l, o, n, ok) in changes]
+                        if persisted:
+                            print(f"  ✓ Date of Hire verified: {actual}")
+                        else:
+                            date_misses.append((label, doh, actual))
+                            print(f"  ⚠ Date of Hire STILL not persisted (shows "
+                                  f"'{actual or 'blank'}') — logged for manual entry")
+
                     status = "updated" if saved else "save-failed"
                     log_rows(writer, label, uuid, matched_by, status, changes=changes)
                     if saved:
@@ -1205,6 +1290,16 @@ async def run():
                     for lbl, uid in gender_review:
                         gw.writerow([lbl, uid, "Gender was blank; defaulted to Male — review"])
 
+            # Any Date of Hire that could not be made to persist (for manual entry).
+            if date_misses:
+                with open(DATE_NOT_PERSISTED_CSV, "w", newline="", encoding="utf-8-sig") as df:
+                    dw = csv.writer(df)
+                    dw.writerow(["name", "date_of_hire", "value_in_emr"])
+                    for lbl, exp, act in date_misses:
+                        dw.writerow([lbl, exp, act])
+                print(f"⚠ Date of Hire failed to persist for {len(date_misses)} — "
+                      f"see {DATE_NOT_PERSISTED_CSV}")
+
             # EMR employees that no roster row matched (i.e. not in the active roster).
             matched_uuids = {uuid for _, uuid, _ in resolved}
             not_in_roster = [p for p in index["people"] if p["uuid"] not in matched_uuids]
@@ -1223,9 +1318,11 @@ async def run():
                       f"see {GENDER_REVIEW_CSV}")
             popup(f"Employee update complete.\n\nUpdated {updated}\n"
                   f"Skipped {len(unmatched)}\nErrors {errored}\n"
-                  f"Gender review needed: {len(gender_review)}\n\n"
+                  f"Gender review needed: {len(gender_review)}\n"
+                  f"Date of Hire not persisted: {len(date_misses)}\n\n"
                   f"See employee_updates_log.csv"
                   + (" and gender_review_needed.csv" if gender_review else "")
+                  + (" and date_not_persisted.csv" if date_misses else "")
                   + " for details.",
                   title="EMR AutoMate — done")
         finally:
@@ -1270,5 +1367,11 @@ if __name__ == "__main__":
         print(f"Wrote {n} row(s) to {ROSTER_XLSX}")
         for w in warnings:
             print("  note:", w)
+    elif "--roster" in sys.argv:
+        i = sys.argv.index("--roster")
+        if len(sys.argv) <= i + 1:
+            print("Usage: python update_employees.py --roster <path-to-xlsx>")
+            sys.exit(1)
+        asyncio.run(run(sys.argv[i + 1]))
     else:
         asyncio.run(run())

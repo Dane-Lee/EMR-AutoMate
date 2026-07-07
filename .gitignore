@@ -19,6 +19,11 @@ roster_not_in_emr.csv
 roster_rerun.xlsx
 # Identifier-cleanup fix sheet (truncated IDs to re-push, PII)
 roster_idfix.xlsx
+# Blank Date-of-Hire worklist + DoH-only fix/test sheets + failure report (PII)
+date_of_hire_todo.csv
+date_not_persisted.csv
+roster_dohfix.xlsx
+roster_dohtest.xlsx
 # Running log of newly-composed encounter descriptions (to merge into the worksheet)
 new_descriptions_for_library.csv
 # Real employee data / notes dropped into the project folder (PII / PHI)
