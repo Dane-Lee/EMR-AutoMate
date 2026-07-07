@@ -4,6 +4,12 @@
 > don't lose the thinking. Decisions in the "Open decisions" section are not yet
 > made. Nothing here is built yet.
 
+> **Related (separate feature):** Employee **roster update** (update employee file
+> info in the EMR from an Excel roster) is a distinct function with its own plan
+> (`inherited-launching-mitten.md`), spec (`ROSTER_UPDATE_PROMPT.md`), and code
+> (`update_employees.py`, launched from `emr_automate.py`). It's not part of this
+> mobile→EMR integration; see TODO.md "Employee Roster Update".
+
 ## Goal
 Make Dane's existing capture tools the single point of entry, and have EMR AutoMate
 push those encounters into the official ATI EMR as **drafts** ("Save in progress")

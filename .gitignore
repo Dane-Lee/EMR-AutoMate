@@ -5,6 +5,23 @@
 debug/
 # Working input with real employee encounter data (PHI)
 encounters.csv
+# Working input with the real employee roster (PII) — template is safe to commit
+roster.xlsx
+# Audit log of employee updates (old->new employee PII)
+employee_updates_log.csv
+# Generated reports with employee PII
+gender_review_needed.csv
+nickname_candidates.csv
+identifier_shortened.csv
+emr_not_in_roster.csv
+# Running log of newly-composed encounter descriptions (to merge into the worksheet)
+new_descriptions_for_library.csv
+# Real employee data / notes dropped into the project folder (PII / PHI)
+*EMR_notes*
+Active Associates*.xlsx
+EMR Easy Enter Worksheets.xlsx
+# Stray / scratch files
+Untitled-*.txt
 
 # ── Python ──
 __pycache__/

@@ -25,6 +25,8 @@ import asyncio
 import csv
 import ctypes
 import os
+import re
+import sys
 from playwright.async_api import async_playwright, Page
 from datetime import date, datetime
 
@@ -199,6 +201,17 @@ CHECKBOX_UUID_MAP = {
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
+
+def name_pattern(full_name):
+    """Build a whitespace-tolerant regex for a 'Last, First' name so it still matches
+    the EMR's inconsistent formatting — e.g. 'Doe , Jane' (space before the comma),
+    'Poe, William "Will"' (trailing nickname), or 'Van Dam, Kay' (two-word
+    last name). Spaces become \\s+ and the comma tolerates surrounding whitespace.
+    """
+    parts = [p.strip() for p in str(full_name).split(",") if p.strip()]
+    tokens = [r"\s+".join(re.escape(w) for w in p.split()) for p in parts]
+    return re.compile(r"\s*,\s*".join(tokens), re.IGNORECASE)
+
 
 async def snap(page: Page, label: str):
     """Save a screenshot + the page's HTML to ./debug for selector debugging.
@@ -473,7 +486,8 @@ async def fill_encounter(page: Page, ENCOUNTER):
     full_name = ENCOUNTER["employee_search"].strip()
     print(f"Locating employee: {full_name}")
 
-    rows = page.locator(".employee-list .details", has_text=full_name)
+    pattern = name_pattern(full_name)
+    rows = page.locator(".employee-list .details", has_text=pattern)
     if await rows.count() == 0:
         last_name = full_name.split(",")[0].strip()
         print(f"  Not found directly — narrowing the list by '{last_name}'...")
@@ -481,7 +495,7 @@ async def fill_encounter(page: Page, ENCOUNTER):
         await box.click()
         await box.fill(last_name)
         await page.wait_for_timeout(1200)
-        rows = page.locator(".employee-list .details", has_text=full_name)
+        rows = page.locator(".employee-list .details", has_text=pattern)
 
     await snap(page, "02_employee_list")
 
@@ -832,5 +846,100 @@ async def run_interactive(page: Page):
             break
 
 
+async def run_capture_fields(employee_name):
+    """Open a fresh Coaching Encounter form for one employee and capture every option
+    in the Department / Division / Category / Shift dropdowns (read-only, no save).
+    Writes emr_field_options.json so we can map source data -> the real EMR options.
+    """
+    import json
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            USER_DATA_DIR, headless=False, slow_mo=100)
+        page = context.pages[0] if context.pages else await context.new_page()
+        try:
+            await page.goto(BASE_URL)
+            await page.wait_for_load_state("networkidle")
+            popup("Log in / confirm Navarre if needed, then click OK to capture the "
+                  "encounter dropdown options.", title="EMR AutoMate — field capture")
+            await page.wait_for_load_state("networkidle")
+
+            full_name = employee_name.strip()
+            print(f"Locating {full_name}...")
+            rows = page.locator(".employee-list .details", has_text=full_name)
+            if await rows.count() == 0:
+                last = full_name.split(",")[0].strip()
+                box = page.locator("input[placeholder='Search Employee or Identifier']")
+                await box.click()
+                await box.fill(last)
+                await page.wait_for_timeout(1200)
+                rows = page.locator(".employee-list .details", has_text=full_name)
+            if await rows.count() == 0:
+                print(f"Couldn't find '{full_name}'. Try a different name.")
+                return
+            await rows.first.scroll_into_view_if_needed()
+            await rows.first.click()
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(2500)
+
+            # Add Case -> Coaching Encounter (same flow the drafts use)
+            btn = page.locator("button:has-text('+ Add Case')")
+            await btn.wait_for(state="visible", timeout=20000)
+            try:
+                await btn.click(timeout=8000)
+            except Exception:
+                await btn.click(force=True)
+            await page.wait_for_timeout(800)
+            await page.locator(".assessment-type-container",
+                               has_text="Coaching Encounter").click()
+            await page.wait_for_timeout(400)
+            await page.get_by_role("button", name="Add Case", exact=True).click()
+            await page.wait_for_load_state("networkidle")
+            await page.locator(
+                "input.form-field-input[placeholder='Date of Encounter']"
+            ).wait_for(state="visible", timeout=20000)
+            await page.wait_for_timeout(800)
+
+            options = {}
+            for label in ("Department", "Division", "Category", "Shift"):
+                try:
+                    control = page.locator(
+                        f"xpath=//label[normalize-space(.)='{label}']"
+                        f"/following-sibling::div[1]"
+                        f"//div[contains(@class,'ati-react-select__control')]").first
+                    await control.click(timeout=6000)
+                    await page.wait_for_timeout(600)
+                    opts = await page.locator(".ati-react-select__option").all_inner_texts()
+                    options[label] = [o.strip() for o in opts if o.strip()]
+                    print(f"  {label}: {len(options[label])} options")
+                    await snap(page, f"FIELD_{label}")
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(300)
+                except Exception as e:
+                    print(f"  WARNING: couldn't read {label}: {str(e).splitlines()[0]}")
+                    options[label] = []
+                    try:
+                        await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+
+            out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "emr_field_options.json")
+            with open(out, "w", encoding="utf-8") as fh:
+                json.dump(options, fh, indent=2)
+            print(f"\nSaved dropdown options to {out}")
+            popup("Captured the 4 dropdown option lists to emr_field_options.json.\n\n"
+                  "Click OK to close.", title="EMR AutoMate — field capture done")
+        finally:
+            await context.close()
+
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    if "--capture-fields" in sys.argv:
+        i = sys.argv.index("--capture-fields")
+        name = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
+        if not name:
+            print('Usage: python ati_coaching_encounter.py --capture-fields "Last, First"')
+        else:
+            asyncio.run(run_capture_fields(name))
+    else:
+        asyncio.run(run())

@@ -6,6 +6,71 @@ what decisions we made, and where we left off. See `TODO.md` for the forward lis
 
 ---
 
+## Sessions 6–13 — 2026-06-26 → 07-06 (Roster-update feature, field-mapping engine, mobile bridge, 3 encounter batches)
+
+Big stretch; grouped by theme rather than day.
+
+### Encounter batches drafted (dictation → CSV → EMR drafts)
+- **6/30 (40)**, **7/1 (97)**, **7/2 (66)** coaching encounters drafted via `encounters.csv`.
+  Flow: Dane dictates → a cleanup pass structures it (`DICTATION_PROMPT.md`) → I build the
+  validated `encounters.csv` → `emr_automate.py` → **Coaching Encounters** drafts each ("Save
+  in progress").
+- **Dept/Division/Category/Shift enrichment:** captured the EMR's real dropdown options
+  (`ati_coaching_encounter.py --capture-fields` → `emr_field_options.json`; Dept 49 / Div 8 /
+  Category / Shift) and built **`emr_field_map.py`** — a reusable *area-text → Department*
+  resolver + Dane-confirmed *Department → Division* map (+ station-number ranges, and a
+  work-title fallback for when no area is captured). Category = "Full Time/Part Time"; Shift
+  from the roster.
+- **Tolerant name matching** (`name_pattern`): the EMR stores names inconsistently —
+  `Doe , Jane` (space before comma), `Roe, John` (missing "Jr."), `Van Dam, Kay`
+  (compound last name), `Poe, William "Will"` (nickname). Matcher is now whitespace/comma
+  tolerant + substring; we correct to the EMR's stored form and re-run only failed rows.
+
+### Employee Roster Update feature (`update_employees.py`, launched via "Update Roster")
+- Matches each roster row to an EMR employee (**Identifier then Name**, via the UUID embedded
+  in dashboard rows), drives `/editemployee?id=<UUID>`, sets Identifier (`ID-Title-Shift`) +
+  Date of Hire, auto-applies. `--from-hc` converts the HC Reporting export → `roster.xlsx`.
+- Extras: `--nicknames` report, gender auto-default (blank→Male + flag), EMR-not-in-roster
+  report, identifier length-cap infra (`MAX_IDENTIFIER_LEN`).
+- **First full run (246) failed midway:** EMR **session timed out ~1 hr in** → every later
+  `editemployee` load hit the login screen (140 failed). FIXED with `open_edit_form()` session
+  guard (detects login → prompts re-login → retries). Date picker was also only ~35% reliable
+  (two `ati-datepicker`s; unscoped selector grabbed the hidden one) → FIXED by scoping to
+  `.rc-calendar:visible` + retry. Redo on the new 262 roster running as of 7/6.
+
+### Launcher dialog
+- `emr_automate.py` popup: relabeled buttons (Coaching Encounters / Update Roster). tkinter
+  rendered **blank** on Dane's machine → switched to a native Windows **Task Dialog**
+  (`comctl32.TaskDialogIndirect`). Lesson: don't launch interactive GUI runs from a background
+  shell — it can't reach Dane's desktop.
+
+### Mobile-capture pivot (interim bridge)
+- Decided to move encounter intake from dictation → the **mobile-encounter-companion** app
+  (the PLAN.md integration direction; dictation stays fallback). Built **`mobile_import.py`**
+  (`--from-mobile`): mobile JSON export → `encounters.csv` (only `ready_for_export` records;
+  real Navarre areas resolve via `emr_field_map`; reads a `shift` field once the app adds it).
+
+### Data / housekeeping
+- `EMR Easy Enter Worksheets.xlsx` (Dane's standard-description library) got overwritten with
+  roster data → recovered (14 tabs) from OneDrive version history.
+- New authoritative roster **`Active Associates - Navarre  7-2-26.xlsx`** (262 people, with a
+  **Nickname column** — resolves identities, e.g. a formal first name to its nickname).
+- **Project relocated 2026-07-06** to `C:\Users\dane.lee\Alternate Desktop\Dane - Coding
+  Projects\EMR AutoMate` (+ `…\Dane - ATI Stuff`). This is now the live git repo (the old
+  OneDrive copy's `.git` is broken).
+
+### Open / next
+- Finish + analyze the 262 roster redo; handle unmatched employees; check the ~8 long
+  identifiers (>40 chars) for server-side truncation → set `MAX_IDENTIFIER_LEN` if needed.
+- **Nickname re-split:** saving an edit makes the EMR strip `First "Nick"` out of the
+  searchable First Name box (search ignores the Nickname box). Needs a quick live test (does
+  re-entering survive a save?); the roster nickname column would then let the tool set First
+  Name = `Formal "Nick"` automatically.
+- Mobile: a real export to confirm areas resolve end-to-end; then live mobile → ETS → AutoMate
+  (Phase 1 in PLAN.md).
+
+---
+
 ## Session 5 — 2026-06-23 (Live test #2 — employee lookup fixed)
 
 - Persistent profile worked: browser opened straight to **Hendrickson / Navarre**

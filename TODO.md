@@ -5,6 +5,56 @@ finish them. Newest priorities at the top of each section.
 
 Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
+> **Status 2026-07-06:** Encounter batches 6/30 (40), 7/1 (97), 7/2 (66) all drafted.
+> Roster-update tool + fixes (session guard, date picker) done; **262-person roster redo
+> running now**. Mobile JSON bridge (`mobile_import.py`) built. Project relocated to
+> `Alternate Desktop`. Open: analyze roster redo + unmatched list + long-identifier
+> truncation; nickname re-split fix; real mobile export → live ETS integration.
+> Full narrative in `WORKLOG.md`.
+
+---
+
+## 📌 Today (2026-07-01)
+
+- [x] **Dept/Division/Category/Shift mapping built (2026-07-01).** Captured the EMR
+      option lists (`--capture-fields` → `emr_field_options.json`: Dept 49 / Div 8 /
+      Category / Shift). Built `emr_field_map.py`: area-text → Department resolver +
+      Dane-confirmed Department→Division correlation; Category = "Full Time/Part Time";
+      Shift from the HC roster. Enriched all 40 of 6/30 → validated (0 errors, every
+      value is a real EMR option). Reusable for the mobile-JSON path too.
+      TODO: verify the `(?)`-inferred Department→Division rows in `emr_field_map.py` as
+      new areas come up; "Team Lead" isn't an option (used "Line Lead").
+- [ ] **Redo the roster run (not now — later today).** `roster.xlsx` is filtered to the
+      207 not-done rows; re-run with a FRESH login. Session guard + date-picker fix are
+      in. Details in "Employee Roster Update" below. Regenerate full 246 via `--from-hc`.
+- [ ] **Draft the 40 coaching encounters for 6/30.** `encounters.csv` is built + passes
+      the validator (40 rows, 0 errors). Run `emr_automate.py` → **Coaching Encounters**.
+      One assessment (Wyler, Sandra follow-up) is manual. NOTE: descriptions were
+      composed in Dane's EIS/EE voice because the Easy Enter file was unreadable — swap
+      to verbatim templates once it's recovered. New descriptions logged to
+      `new_descriptions_for_library.csv`.
+- [ ] **Recover `EMR Easy Enter Worksheets.xlsx`.** It was overwritten with roster data
+      (~6/30 2:57 PM) — the 14 template tabs are gone from the local copy. Restore the
+      good version via OneDrive **Version history** (or OneDrive recycle bin). Then align
+      the 6/30 encounter descriptions to the verbatim templates.
+- [ ] **Pivot encounter intake: Claude dictation → Mobile Encounter capture system.**
+      Decided 2026-07-01: use the existing **mobile-encounter-companion → ETS** pipeline
+      as the real input instead of dictation/CSV (which drops to fallback). This IS the
+      documented integration direction — see "Next up — INTEGRATION DIRECTION" below +
+      PLAN.md. Known prereqs (already listed there): verify mobile→ETS sync works E2E;
+      decide how `mobile_capture_entries` become real encounters (auto-convert vs import);
+      build the label-mapping layer + name reconciliation; do the Phase-1 thin slice.
+- [ ] **FUTURE capture UX (ETS + Mobile Encounter Companion) — requested 2026-07-01:**
+      - **Employee -> location correlation table:** default each employee to their
+        most-likely Department/Division (learned from past encounters), correctable
+        inline. (The 6/30->7/1 "reuse prior entry" logic + `emr_field_map.py` are the
+        seed of this — formalize as a per-employee, self-updating table.)
+      - **Cascading auto-fill:** Department -> likely locations (from past encounters)
+        -> likely stations (from the chosen location + past encounters).
+      - **"Add other employees":** after capturing one encounter, offer (non-nagging) to
+        duplicate it for additional employees just by typing their names — auto-recreates
+        the identical encounter for each.
+
 ---
 
 ## ✅ Core flow — DONE (verified end-to-end against live EMR, 2026-06-23)
@@ -23,6 +73,104 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
       `ati-react-select`), CoachingType (one-word label), detail checkboxes
       (hidden input → click `label.custom-checkbox`), description, what-prompted.
 - [x] **Save = draft** ("Save in progress"); never finalizes.
+
+## 🆕 Employee Roster Update (NEW function — added 2026-06-26)
+
+Update employee FILE INFO (Name, Identifier, Date of Hire, Email, etc.) in the EMR
+from an Excel roster. Reached via the `emr_automate.py` launcher popup (Yes =
+encounters, No = update employees). Plan: `inherited-launching-mitten.md`.
+Spec: `ROSTER_UPDATE_PROMPT.md`. Decisions: .xlsx source · match Identifier-then-Name ·
+update-existing-only · auto-apply with up-front confirm + audit log.
+
+- [x] `update_employees.py` — roster reader (openpyxl), Identifier→Name matcher,
+      edit flow, orchestration, audit log; `emr_automate.py` launcher; spec doc +
+      `roster_template.xlsx`. *(2026-06-26)*
+- [x] **Offline-verified:** reader (int/datetime/blank cells + validation) and matcher
+      against the saved 938-row dashboard capture — 16/16 checks pass. *(2026-06-26)*
+- [x] **STEP 0 — captured the `/editemployee` form** (a test employee, 2026-06-26) and wired
+      VERIFIED selectors into `EDIT_FIELD_SPECS`: firstName/middleName/lastName/
+      nickName, badgeNumber (Identifier = "number - title"), contactEmail, 3-part phone
+      (area/exchange/subs) + contactExt, Gender react-select, Date of Hire / Date of
+      Birth pickers, and the `.save-button` div (SAVE is a div, not a `<button>`).
+      Medical-history/screening section + read-only Location intentionally NOT wired.
+- [x] **Field set decided (2026-06-29):** Name (first/middle/last) + Identifier + Date
+      of Hire. NOT edited: Gender, Date of Birth, Phone, Email, Nickname box, medical
+      section. `roster_template.xlsx` trimmed to: identifier, name, first_name,
+      middle_name, last_name, new_identifier, date_of_hire.
+- [x] **Nickname handling:** nicknames go in First Name as `First "Nick"` (the EMR only
+      searches first/last boxes). Built `--nicknames` report → `nickname_candidates.csv`
+      (live roster preview: 223 candidates, 40 already done).
+- [x] **Gender auto-default:** not edited, but blanks default to "Male" + flagged to
+      `gender_review_needed.csv` so Save (required field) doesn't fail.
+- [x] **Identifier format decided (2026-06-30):** `ID-Title-Shift`, e.g.
+      `12345-Technician II-2nd` (no spaces around joining dashes; suffixed IDs like
+      `11111-01` preserved). `new_identifier` column now active.
+- [x] **HC roster importer built** (`--from-hc <xlsx>`): maps Associate ID/Name/Shift/
+      Primary Position/Hire Date → `roster.xlsx` (identifier, name as "Last, First",
+      new_identifier, date_of_hire). Ran on Dane's file → 246 rows, 0 errors; 242/246
+      matched vs the 2026-06-23 snapshot (live will be fresher). Fixed `parse_badge_
+      identifier` to keep ID suffixes.
+- [ ] **Handle the ambiguous match** (a name with 2 records in the EMR) — correctly
+      skipped+flagged. Dane disambiguates manually (or add an `identifier` that's
+      already in EMR). A few recent hires were absent from the old snapshot —
+      recheck on the live run.
+- [x] **EMR-not-in-roster report (2026-06-30):** `run()` writes `emr_not_in_roster.csv`
+      (EMR employees no roster row matched) at the end of a run, per Dane's request.
+- [x] **Identifier length-cap infra (2026-06-30):** `MAX_IDENTIFIER_LEN` (None until the
+      server cap is known) → importer shortens the TITLE part (keeps ID+shift) to fit
+      and logs each change to `identifier_shortened.csv`. Lengths run 16–58 chars
+      (median 21); ~8 are >40 (e.g. EHS Rep III = 58).
+- [x] **Live single-employee test PASSED (2026-06-30):** a test employee — identifier AND
+      Date of Hire both set + saved; Gender untouched; verified in log + screenshot.
+- [x] **Date of Hire picker SOLVED:** the field rejects typing — it's an rc-calendar
+      (wrapped in `ati-calender-container`). `_set_date` now opens it, navigates by
+      year/month buttons, clicks the day cell by title ("January 5, 2026"), clicks
+      Apply, and **Cancels on failure so it never wipes** an existing date. Added
+      `--capture-date` mode used to capture the open calendar.
+- [ ] **Confirm Gender option label** is `Male` — not yet exercised (the employee already had a
+      gender set); will trigger only for a blank-gender employee.
+- [ ] **⚠ KNOWN ISSUE (2026-06-30): EMR strips quoted nicknames on save.** When a record
+      is saved, the EMR moves a `First "Nick"` (e.g. `James "Jim"`) out of First Name into
+      the Nickname box — which search ignores, breaking find-by-nickname. Our tool does
+      NOT touch the name fields (only Identifier + Date of Hire), so this is EMR save
+      behavior affecting any nickname employee whose record we save. PAUSED the run.
+      NEED a manual test: re-enter `First "Nick"`, clear Nickname, save, reopen — does it
+      stick or re-split? If sticks → tool recombines nickname into First Name per record
+      (also repairs already-changed ones). If re-splits → skip nickname employees in the
+      auto-run; real fix = get ATI to include the Nickname box in search.
+- [x] **First full run (2026-06-30) — diagnosed + fixed.** Result: 35 fully done, 66
+      identifier-only (date failed), 140 untouched, ~5 unmatched. NO data wiped. Two
+      root causes found + fixed:
+      1. **Session timeout ~1hr in (14:27):** every later `editemployee` load hit the
+         login screen (confirmed by EMP_edit_241 screenshot) → all 140 failed silently.
+         FIX: `open_edit_form()` session guard — detects the login screen, prompts
+         re-login, retries.
+      2. **Date picker only ~35% reliable:** page has TWO ati-datepickers, each with an
+         `.rc-calendar`; unscoped selector grabbed the wrong/hidden one. FIX: scope to
+         `.rc-calendar:visible` + retry once.
+- [ ] **Redo run:** `roster.xlsx` filtered to the 207 not-done rows. Re-run with a FRESH
+      login; the guard will pause for re-login if it times out again (~2/3 through).
+      Regenerate the full 246 anytime with `--from-hc`. Still watch long identifiers for
+      server truncation → set `MAX_IDENTIFIER_LEN` if needed.
+- [ ] **Discover the Identifier server length cap** from the live run (esp. a long one
+      like the 58-char EHS Rep), then set `MAX_IDENTIFIER_LEN`.
+
+## 🆕 Batch encounter/assessment intake (requested 2026-06-30)
+Dane has 40+ encounters/assessments from one day to enter, from dictated notes, mostly
+coaching encounters.
+
+- [x] **Intake prompt updated:** `TRANSCRIPTION_PROMPT.md` now routes coaching encounters
+      → `encounters.csv` and lists assessments separately under
+      `ASSESSMENTS — manual entry` (Dane enters those by hand for now). *(2026-06-30)*
+- [x] **Launcher buttons relabeled (2026-06-30):** `emr_automate.py` `popup_choice()`
+      switched from MessageBoxW Yes/No/Cancel to a tkinter dialog with real labeled
+      buttons — **Coaching Encounters / Update Roster / Cancel** (Dane disliked clicking
+      "No" to mean Roster).
+- [ ] **NEXT BUILD — "start + first screen only" drafting** (Dane wants it for the rest
+      of the week): extend the tool to pick the case-type tile, fill the shared
+      Encounter-Details first screen, and "Save in progress" — for BOTH encounters and
+      assessments. Per PLAN.md Gap B: Coaching = Step 1+2; Assessments = Step 1 only.
+      VERIFY first-screen parity by capturing one of each assessment type.
 
 ## 🔴 Next up — INTEGRATION DIRECTION (see PLAN.md)
 
