@@ -5,6 +5,8 @@
 debug/
 # Working input with real employee encounter data (PHI)
 encounters.csv
+# Parked PA Follow-Up assessments (PHI) — tool can't draft these yet
+pa_follow_ups.csv
 # Working input with the real employee roster (PII) — template is safe to commit
 roster.xlsx
 # Audit log of employee updates (old->new employee PII)
