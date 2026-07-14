@@ -31,6 +31,7 @@ import sys
 from playwright.async_api import async_playwright, Page
 from datetime import date, datetime
 
+import emr_field_map
 import phi_redact
 from phi_redact import ph, pd  # ph(name) / pd(free text) — see PHI NOTE below
 
@@ -736,6 +737,48 @@ CSV_COLUMNS = [
 ]
 
 
+def _echo(value):
+    """Render a rejected value for an error message, without leaking PHI.
+
+    Dropdown values are short ("Frame Weld", "Line Lead"), so echoing them is safe and
+    is what makes an error actionable. But when a row's columns are misaligned — an
+    unquoted comma in the description shifts everything left — a whole clinical note
+    can land in a dropdown column, and echoing *that* would put PHI into a message
+    Claude and bug reports get to see.
+
+    So: short values echo, long ones are suppressed with the diagnosis they actually
+    imply, which is more useful than the text anyway.
+    """
+    v = str(value or "")
+    if len(v) <= 40:
+        return f"'{v}'"
+    return (f"[{len(v)} characters of free text — this row's columns are almost "
+            f"certainly misaligned, likely an unquoted comma in the description]")
+
+
+def _exact_option(field, value, col, line_no, errs):
+    """Match `value` against an EMR dropdown's options. Returns the canonical option,
+    or None.
+
+    Case-insensitive, so 'line lead' becomes 'Line Lead'. "Select" is the EMR's own
+    empty-choice placeholder and means blank. Appends to `errs` when the value is
+    unrecognised — pass an empty list to probe without recording an error (the caller
+    may want to try the field mapper first).
+    """
+    value = (value or "").strip()
+    if not value or value.casefold() == "select":
+        return None
+    options = FIELD_OPTIONS.get(field, [])
+    if not options:
+        return value  # no options file → don't block the run
+    canonical = {o.casefold(): o for o in options}
+    if value.casefold() in canonical:
+        return canonical[value.casefold()]
+    errs.append(f"Row {line_no}: {col} {_echo(value)} is not valid. "
+                f"Use one of: {' | '.join(options)}  (or leave it blank)")
+    return None
+
+
 def row_to_encounter(row, line_no):
     """Convert one CSV row to an ENCOUNTER dict. Returns (encounter, [errors])."""
     errs = []
@@ -751,12 +794,12 @@ def row_to_encounter(row, line_no):
 
     encounter_type = get("encounter_type") or ENCOUNTER_TYPES[0]
     if encounter_type not in ENCOUNTER_TYPES:
-        errs.append(f"Row {line_no}: encounter_type '{encounter_type}' is not valid. "
+        errs.append(f"Row {line_no}: encounter_type {_echo(encounter_type)} is not valid. "
                     f"Use one of: {' | '.join(ENCOUNTER_TYPES)}")
 
     coaching_type = get("coaching_type")
     if coaching_type not in COACHING_TYPE_UUIDS:
-        errs.append(f"Row {line_no}: coaching_type '{coaching_type}' is not valid. "
+        errs.append(f"Row {line_no}: coaching_type {_echo(coaching_type)} is not valid. "
                     f"Use one of: {' | '.join(COACHING_TYPE_UUIDS)}")
 
     detail_set = CHECKBOX_UUID_MAP.get(coaching_type, {})
@@ -764,33 +807,53 @@ def row_to_encounter(row, line_no):
     for d in details:
         if d not in detail_set:
             valid = ", ".join(detail_set) if detail_set else "(this type has no detail options)"
-            errs.append(f"Row {line_no}: detail '{d}' is not valid for "
+            errs.append(f"Row {line_no}: detail {_echo(d)} is not valid for "
                         f"{coaching_type or '(no type)'}. Valid: {valid}")
 
     what_prompted = get("what_prompted") or WHAT_PROMPTED_OPTIONS[0]
     if what_prompted not in WHAT_PROMPTED_OPTIONS:
-        errs.append(f"Row {line_no}: what_prompted '{what_prompted}' is not valid. "
+        errs.append(f"Row {line_no}: what_prompted {_echo(what_prompted)} is not valid. "
                     f"Use one of: {' | '.join(WHAT_PROMPTED_OPTIONS)}")
 
     # ── Dropdowns: Department / Division / Category / Shift ──
-    # Each is a separate EMR dropdown with a fixed list. A lead or supervisor puts the
-    # ROLE in department and the LINE in division ("line lead, weld" -> Line Lead /
-    # Weld) — they are never one combined value. Blank is always acceptable; a wrong
-    # value is not, so we name the allowed options rather than let it through.
+    # Category and Shift are plain dropdowns: exact value or blank.
     dropdowns = {}
-    for col, field in DROPDOWN_COLUMNS.items():
-        val = get(col)
-        options = FIELD_OPTIONS.get(field, [])
-        if val.casefold() == "select":  # the EMR's placeholder = nothing chosen
-            val = ""
-        if val and options:
-            canonical = {o.casefold(): o for o in options}
-            if val.casefold() in canonical:
-                val = canonical[val.casefold()]  # accept 'line lead' -> 'Line Lead'
-            else:
-                errs.append(f"Row {line_no}: {col} '{val}' is not valid. "
-                            f"Use one of: {' | '.join(options)}  (or leave it blank)")
-        dropdowns[col] = val or None
+    for col in ("category", "shift"):
+        dropdowns[col] = _exact_option(DROPDOWN_COLUMNS[col], get(col), col, line_no, errs)
+
+    # Department and Division are different: Dane dictates the work area the way he
+    # says it out loud — "Finishers", "THT", "line lead, weld", "station 85" — and
+    # emr_field_map exists precisely to turn that phrasing into the EMR's vocabulary.
+    # So anything that isn't already an exact option goes through the mapper rather
+    # than being rejected. Expecting the transcriber to memorise 49 department names
+    # is what produced 71 near-miss values in a single batch.
+    department = _exact_option("Department", get("department"), "department", line_no, [])
+    division = _exact_option("Division", get("division"), "division", line_no, [])
+
+    if get("department") and not department:
+        mapped_dept, mapped_div = emr_field_map.resolve(get("department"))
+        department = mapped_dept or None
+        # The mapper reads the line out of the same phrase ("line lead, weld" -> Weld),
+        # so let it supply the division — but never overwrite one Dane gave explicitly.
+        if not division:
+            division = mapped_div or None
+        if not department:
+            errs.append(f"Row {line_no}: department {_echo(get('department'))} is not valid "
+                        f"and could not be mapped to an EMR department. Use one of: "
+                        f"{' | '.join(FIELD_OPTIONS.get('Department', []))}  "
+                        f"(or leave it blank)")
+
+    if get("division") and not division:
+        _, mapped_div = emr_field_map.resolve(get("division"))
+        division = mapped_div or None
+        if not division:
+            errs.append(f"Row {line_no}: division {_echo(get('division'))} is not valid and "
+                        f"could not be mapped. Use one of: "
+                        f"{' | '.join(FIELD_OPTIONS.get('Division', []))}  "
+                        f"(or leave it blank)")
+
+    dropdowns["department"] = department
+    dropdowns["division"] = division
 
     encounter = {
         "employee_search": employee,

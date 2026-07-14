@@ -61,6 +61,10 @@ run if anything is off. Use these values verbatim.
   - **Leads and supervisors:** the *role* goes in `department`, the *line they work*
     goes in `division`. So "line lead on weld" → `department=Line Lead`,
     `division=Weld`. Not `"Line Lead, Weld"` in one field.
+  - **If the area Dane says isn't on the list, write it exactly as he said it** —
+    "Finishers", "THT", "station 85", "materials handler". The tool maps his usual
+    phrasings to the right EMR department automatically. A faithful transcription is
+    far more useful than a guess at the official name.
 - **`details`** — zero or more labels from the chosen coaching type's list below,
   **separated by semicolons**: `Hydration; Stress`. Some types take none — leave blank.
   - If the encounter fits a type but no named detail matches, use **`Other`** (where
@@ -72,7 +76,23 @@ run if anything is off. Use these values verbatim.
   the bottom of this prompt whenever one fits**, filling any `____` placeholder with
   what was actually said. Keep the third-person EIS/EE voice. Only compose a new one
   when nothing fits — and list it in section 3.
-- **Any field containing a comma must be double-quoted.** When unsure, quote it.
+- **Double-quote EVERY field, on every row — always.** Not just the ones with commas.
+  A single unquoted comma shifts every later column one place left and silently
+  corrupts the row, and it is not obvious from looking at it. Quoting everything makes
+  that impossible. `"Smith, Jane","07/14/2026","In Person",...`
+
+## Output the WHOLE batch — never truncate
+
+Dane may dictate 80+ encounters. **Every one must appear in the CSV.** Do not stop
+early, do not summarise, do not write "... and 55 more".
+
+If the batch is too long for one reply, say so explicitly and output the rest in a
+second ```csv block (repeat the header row) — either later in the same reply or in
+your next message. Never silently drop rows: a truncated batch means encounters that
+never reach the medical record, and Dane cannot see what's missing.
+
+State the row count at the end: `80 encounters written.` Dane checks it against his
+own count.
 
 **`encounter_type`** — exactly one of:
 `In Person` · `Via Phone or Microsoft Teams` · `Via Telehealth Platform` · `Via Email`

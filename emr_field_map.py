@@ -90,14 +90,17 @@ _AREA_PATTERNS = [
     (r"parts?\s*pick", "Parts Pick"),
     (r"parts?\s*box", "Parts Box"),
     (r"pack\s*out|packaging", "Packaging"),
-    (r"ship|receiv|material\s*hand", "Material Handler"),
+    (r"ship|receiv|materials?\s*hand", "Material Handler"),  # "materials handler" too
     (r"wrap\s*weld\s*load", "Wrap Weld Load"),           # before 'wrap weld'
     (r"wrap\s*weld", "Wrap Weld"),
     (r"suspension", "Suspension"),
     (r"spider", "Spiders Machine"),
     (r"bushing", "Bushing Press"),
-    (r"frame\s*bracket\s*press", "Frame Bracket Press"),
-    (r"frame\s*bracket|tack", "Frame Bracket"),          # Tack Station -> Frame Bracket (Dane 7/6)
+    # "frame press" / "frame bracket press" both mean the press (Dane 2026-07-14).
+    (r"frame\s*(bracket\s*)?press", "Frame Bracket Press"),
+    # "frame weld" is the bracket station (Dane 2026-07-14). Keep this AFTER the press
+    # rule so "frame bracket press" isn't swallowed by it.
+    (r"frame\s*bracket|frame\s*weld|tack", "Frame Bracket"),  # Tack Station -> Frame Bracket (Dane 7/6)
     (r"beam\s*press", "Beam Press"),
     (r"\bbeam\b", "Beam"),
     (r"axle\s*upload", "Axle Upload"),
