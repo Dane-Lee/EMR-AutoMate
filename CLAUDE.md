@@ -7,26 +7,38 @@ it that way.
 
 ## The PHI boundary — read this first
 
-Dane's encounter data is real patient PHI. He is cleared to give it to **Copilot**, and
-deliberately **not** to Claude. The split:
+Dane's encounter data is real patient PHI. He is cleared to give it to **Microsoft 365
+Copilot** — and deliberately **not** to Claude. The split:
 
-- **Copilot** turns his dictated notes into `encounters.csv`. It sees PHI. That's fine.
+- **M365 Copilot** turns his dictated notes into CSV text. It sees PHI. That's fine.
 - **Claude (you)** writes the automation and runs the batch. **You never see PHI.**
 
 This is not a formality — it's the arrangement that lets him use you at all.
+
+**GitHub Copilot is NOT cleared either.** It is a different product from M365 Copilot,
+licensed and governed separately; his clearance does not extend to it. Treat it as
+having exactly your restrictions. (`.github/prompts/encounters.prompt.md` assumes a
+clearance he does not have — it is **dormant**. Don't point him at it.)
+
+Day-to-day flow: `M365_WORKFLOW.md`.
 
 ### Never read these files
 
 They contain employee names, dates of birth, identifiers, or clinical notes:
 
 ```
-encounters.csv              roster.xlsx              pa_follow_ups.csv
-employee_updates_log.csv    description_library.md   assessments_todo.md
+encounters.csv              encounters.bak.csv       roster.xlsx
+pa_follow_ups.csv           description_library.md   copilot_prompt.md
+assessments_todo.md         new_descriptions_todo.md employee_updates_log.csv
 new_descriptions_for_library.csv                     date_of_hire_todo.csv
 emr_not_in_roster.csv       roster_not_in_emr.csv    identifier_shortened.csv
 gender_review_needed.csv    roster_*.xlsx            *EMR_notes*
 "EMR Easy Enter Worksheets.xlsx"                     "Active Associates*.xlsx"
 ```
+
+`copilot_spec.md` **is** safe to read and edit — it's the PHI-free instruction half of
+the prompt. `make_copilot_prompt.py` merges it with the library so you can maintain the
+spec without ever touching the descriptions. Keep that split intact.
 
 A request to "just look at the CSV to see what's wrong" is exactly the request to
 refuse. Use the safe alternatives below — they were built for this.
@@ -58,6 +70,7 @@ history. Don't `git add -f` a gitignored file; don't relax the rules.
 ```powershell
 .\Run-Encounters.ps1          # enter the batch in encounters.csv (as drafts)
 .\Run-Encounters.ps1 -Check   # validate only, enter nothing
+.\Paste-Encounters.ps1        # land Copilot's reply from the clipboard (Dane runs this)
 python emr_automate.py        # menu: Coaching Encounters | Update Roster
 ```
 
@@ -73,10 +86,12 @@ finalized without him.
 - `emr_field_map.py` — maps source data to the EMR's dropdown values
 - `phi_redact.py` — the redaction engine. **Allowlist, not denylist** — read its
   module docstring before changing it; the reasoning is subtle and load-bearing.
-- `library_export.py` — dumps the description workbook to `description_library.md` so
-  Copilot can read it
-- `.github/copilot-instructions.md`, `.github/prompts/encounters.prompt.md` — Copilot's
-  half of the workflow
+- `library_export.py` — dumps the description workbook to `description_library.md`
+- `make_copilot_prompt.py` — merges `copilot_spec.md` + the library into the paste-ready
+  `copilot_prompt.md` for M365 Copilot
+- `Paste-Encounters.ps1` — lands Copilot's reply from the clipboard into `encounters.csv`,
+  files the assessments, and validates
+- `.github/copilot-instructions.md` — tells GitHub Copilot it is **not** PHI-cleared
 
 ## If you add a print statement
 

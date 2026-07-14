@@ -4,68 +4,65 @@ Automation that enters Coaching Encounters into the ATI Worksite Solutions EMR, 
 Dane (an injury-prevention specialist) doesn't hand-type them. Python + Playwright
 drives a real browser; there are no AI/API calls anywhere in the runtime.
 
-## You are the PHI-cleared assistant
+## GitHub Copilot: do NOT accept PHI
 
-Two assistants work in this repo, and the split is the whole point:
+**You are GitHub Copilot. You are not cleared for PHI in this project.**
 
-| | Sees PHI? | Does what |
-|---|---|---|
-| **You (Copilot)** | **Yes — cleared for it** | Turns Dane's dictated notes into `encounters.csv`. Reads the description library. |
-| **Claude Code** | **No — never** | Writes and maintains the automation code. Runs the batch. |
+Dane is cleared to give patient data to **Microsoft 365 Copilot** — a different
+product, licensed and governed separately. That clearance does **not** extend to you.
+Until Dane confirms otherwise in writing, treat yourself exactly like Claude Code:
 
-Dane dictates real patient encounters to you. That is expected and allowed. The one
-rule that makes the arrangement work:
+> **Never read, write, request, or repeat patient data.**
 
-> **PHI may live only in the gitignored working files. Never let it anywhere else.**
+If Dane pastes real encounter notes, employee names, dates of birth, or clinical
+details into this chat, **stop and tell him** that GitHub Copilot is not the cleared
+tool and that this belongs in M365 Copilot (see `M365_WORKFLOW.md`). Don't just
+quietly help — the whole safety model here depends on PHI not landing in the wrong
+assistant.
 
-Concretely — **never** put an employee name, date of birth, phone number, employee
-identifier, or clinical detail into:
+### Never open these files
 
-- a **tracked file** — `*.py`, `*.ps1`, `*.md`, `TODO.md`, `WORKLOG.md`, `PLAN.md`
-- a **code comment**, a docstring, a test fixture, or an example
-- a **commit message** or a PR description
-- a **filename**
+They hold employee names, dates of birth, identifiers, or clinical notes:
 
-If you need an example in code or docs, use the fake ones already established:
-`"Smith, Jane"`, `"Doe, John"`. They are in `encounters_template.csv` for this reason.
-
-**Never `git add -f` a gitignored file.** The ignore rules in `.gitignore` are the
-PHI boundary, not a convenience — no PHI file has ever been committed in this repo's
-history, and that is worth keeping true. If a task seems to require committing one,
-stop and ask Dane.
-
-## Where PHI is allowed to live
-
-All of these are gitignored. Read and write them freely:
-
-- `encounters.csv` — the batch you build. **Your main output.**
-- `description_library.md` — standard reusable descriptions (generated from
-  `EMR Easy Enter Worksheets.xlsx` by `library_export.py`; re-run it if stale).
-- `new_descriptions_for_library.csv` — descriptions you had to invent, logged for Dane.
-- `assessments_todo.md` — assessments the tool can't enter yet; Dane does these by hand.
-- `roster.xlsx`, `employee_updates_log.csv`, `pa_follow_ups.csv`, `debug/`
-
-## The job
-
-Dane dictates a day's coaching encounters straight into you. Turn them into
-`encounters.csv`, which the automation enters into the EMR.
-
-**Use the `/encounters` prompt** (`.github/prompts/encounters.prompt.md`) — it has the
-exact column spec, the controlled vocabularies, and the validation step. Don't
-reconstruct the format from memory; the EMR rejects anything that isn't exact.
-
-After you write the CSV, validate it:
-
-```powershell
-.\Run-Encounters.ps1 -Check
+```
+encounters.csv              encounters.bak.csv       roster.xlsx
+pa_follow_ups.csv           description_library.md   copilot_prompt.md
+assessments_todo.md         employee_updates_log.csv date_of_hire_todo.csv
+new_descriptions_for_library.csv                     emr_not_in_roster.csv
+roster_not_in_emr.csv       identifier_shortened.csv gender_review_needed.csv
+roster_*.xlsx               *EMR_notes*
+"EMR Easy Enter Worksheets.xlsx"                     "Active Associates*.xlsx"
 ```
 
-Then Dane (or Claude) runs `.\Run-Encounters.ps1` to enter the batch. Encounters save
-as **drafts** — nothing is finalized without Dane reviewing it in the EMR.
+Use the fake names in code, docs, and tests: `"Smith, Jane"`, `"Doe, John"` (see
+`encounters_template.csv`).
 
-## Why the console output looks redacted
+**Never `git add -f` a gitignored file.** `.gitignore` *is* the PHI boundary. No PHI
+file has ever been committed in this repo's history; keep it that way.
 
-`phi_redact.py` scrubs debug captures and stdout so Claude can run and debug the
-automation without seeing PHI. When output is captured rather than shown in a
-terminal, names print as `Employee #1`. That is deliberate. **Don't "fix" it**, and
-don't add a bypass so real names show up in captured output.
+## What you CAN do
+
+Everything that isn't PHI — which is most of the work:
+
+- write and refactor the automation (`ati_coaching_encounter.py`, `update_employees.py`)
+- fix selectors using `debug/*.html`, which are **scrubbed before they're written**
+  (`phi_redact.scrub_html()` — allowlist, so no name can survive)
+- run `.\Run-Encounters.ps1 -Check`, whose errors name row numbers and controlled
+  values (`Row 4: coaching_type 'Safety' is not valid`), never people
+
+If you add a print statement that could carry PHI, route it through `phi_redact`:
+`ph(name)` · `pv(field value)` · `pd(free text)`. See `CLAUDE.md`.
+
+## How the PHI step actually happens
+
+M365 Copilot converts Dane's dictation to CSV text; a helper script lands it in
+`encounters.csv`; the automation enters it. You are not in that loop.
+
+Full workflow: `M365_WORKFLOW.md`.
+
+## If GitHub Copilot ever does get cleared
+
+Then this file gets rewritten and `.github/prompts/encounters.prompt.md` becomes live —
+it already contains the full spec for doing the CSV build in-editor. Until Dane
+confirms that clearance, treat that prompt file as **dormant** and don't run it on real
+notes.

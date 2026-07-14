@@ -31,8 +31,15 @@ new_descriptions_for_library.csv
 # Text dump of the description workbook, so Copilot can read it (library_export.py).
 # Ignored for the same reason its source workbook is.
 description_library.md
+# Paste-ready M365 Copilot prompt = copilot_spec.md + the library (make_copilot_prompt.py).
+# The SPEC is tracked; this generated merge is not, because it embeds the library.
+copilot_prompt.md
 # Assessments Copilot parked for Dane to enter by hand (PHI)
 assessments_todo.md
+# Descriptions Copilot had to invent, to fold back into the workbook (PHI)
+new_descriptions_todo.md
+# Previous encounters.csv, kept by Paste-Encounters.ps1 so a batch is never destroyed
+encounters.bak.csv
 # Real employee data / notes dropped into the project folder (PII / PHI)
 *EMR_notes*
 Active Associates*.xlsx
