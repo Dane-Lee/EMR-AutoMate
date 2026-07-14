@@ -65,6 +65,16 @@ is a denylist and can't be proven clean — leave them off.
 `.gitignore` *is* the boundary. No PHI file has ever been committed in this repo's
 history. Don't `git add -f` a gitignored file; don't relax the rules.
 
+## "Ready to enter"
+
+When Dane says **"ready to enter"**, "let's do the encounters", "I've got encounters to
+put in", or anything to that effect — run the `/ready` command's playbook
+(`.claude/commands/ready.md`): check the batch state with `.\Run-Encounters.ps1 -Check`
+and show him the steps from `RUN_CHECKLIST.md`, in chat, adapted to what you find.
+
+He asks *because he wants the steps in front of him.* Show them; don't just link the
+file.
+
 ## Running it
 
 ```powershell
