@@ -54,7 +54,13 @@ run if anything is off. Use these values verbatim.
 
 - **`employee`** — `"Last, First"`. It contains a comma, so **always double-quote it**.
 - **`date`** — `MM/DD/YYYY`. If no date was said, leave it blank (defaults to today).
-- **`department` / `division` / `category` / `shift`** — optional; blank if not said.
+- **`department` / `division` / `category` / `shift`** — four **separate** columns, each
+  a dropdown with a fixed list (below). Optional — **blank is always safe, a wrong value
+  is not.** If you're unsure, leave it blank.
+  - **Never put a comma inside one of these fields.** They are never combined values.
+  - **Leads and supervisors:** the *role* goes in `department`, the *line they work*
+    goes in `division`. So "line lead on weld" → `department=Line Lead`,
+    `division=Weld`. Not `"Line Lead, Weld"` in one field.
 - **`details`** — zero or more labels from the chosen coaching type's list below,
   **separated by semicolons**: `Hydration; Stress`. Some types take none — leave blank.
   - If the encounter fits a type but no named detail matches, use **`Other`** (where
@@ -75,6 +81,11 @@ run if anything is off. Use these values verbatim.
 `Specialist Initiated` · `Employee Inquiry` · `Demonstrated risk factor at job site` ·
 `Employer prompted contact`
 Default to `Specialist Initiated` if not stated — Dane usually starts the conversation.
+
+<!-- FIELD_OPTIONS -->
+*(The department / division / category / shift lists are injected here from
+`emr_field_options.json` by `make_copilot_prompt.py`, so they can never drift out of
+sync with the EMR. Don't paste them in by hand.)*
 
 **`coaching_type`** and its allowed **`details`**:
 
