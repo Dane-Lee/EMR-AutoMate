@@ -42,7 +42,8 @@ Set-Location -Path $PSScriptRoot
 $csv = Join-Path $PSScriptRoot "encounters.csv"
 if (-not (Test-Path $csv)) {
     Write-Host "No encounters.csv found in $PSScriptRoot" -ForegroundColor Yellow
-    Write-Host "Have Copilot write one first (see TRANSCRIPTION_PROMPT.md for the column spec)."
+    Write-Host "Dictate to M365 Copilot, copy its reply, then run:  .\Paste-Encounters.ps1"
+    Write-Host "Full steps: RUN_CHECKLIST.md  (or ask Claude: 'ready to enter')"
     exit 1
 }
 
