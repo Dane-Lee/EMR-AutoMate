@@ -46,6 +46,9 @@ from playwright.async_api import async_playwright, Page
 
 # Reuse the proven helpers + config from the encounter tool (importing is safe — its
 # __main__ guard means nothing runs on import).
+import phi_redact
+from phi_redact import ph, pv  # ph(name) / pv(field value) — PHI-safe stdout
+
 from ati_coaching_encounter import (
     snap,
     react_select,
@@ -716,7 +719,7 @@ async def _fill_phone(page: Page, value: str) -> bool:
     elif len(digits) == 7:
         a, e, s = "", digits[:3], digits[3:]
     else:
-        print(f"  WARNING: phone '{value}' isn't 7 or 10 digits — skipping.")
+        print(f"  WARNING: phone '{pv(value)}' isn't 7 or 10 digits — skipping.")
         return False
     ok = True
     for name, val in (("area", a), ("exchange", e), ("subs", s)):
@@ -832,7 +835,7 @@ async def _set_date(page: Page, selector: str, value: str, original: str = "") -
             except Exception:
                 pass
 
-    print(f"  WARNING: couldn't set date to {value} — left as '{original or 'unchanged'}'.")
+    print(f"  WARNING: couldn't set date to {pv(value)} — left as '{pv(original) or 'unchanged'}'.")
     return False
 
 
@@ -851,7 +854,7 @@ async def commit_date_of_hire(page: Page, uuid: str, expected: str) -> tuple:
         if _same_date(actual, expected):
             return True, actual
         # Didn't stick — pick it again on this freshly-loaded form and re-save.
-        print(f"  Date of Hire not persisted (shows '{actual or 'blank'}') — "
+        print(f"  Date of Hire not persisted (shows '{pv(actual) or 'blank'}') — "
               f"re-applying {expected} (try {attempt + 1}/3)")
         await _set_date(page, DOH_SELECTOR, expected)
         await save_employee(page)
@@ -899,7 +902,7 @@ async def fill_employee_form(page: Page, row: dict):
 
         changes.append((label, old, new, ok))
         if ok:
-            print(f"  set {label}: '{old}' -> '{new}'")
+            print(f"  set {label}: '{pv(old)}' -> '{pv(new)}'")
     return changes
 
 
@@ -1029,12 +1032,12 @@ async def run_capture(target_name=None):
                 key = normalize_name(target_name)
                 match = next((p_ for p_ in people if normalize_name(p_["name"]) == key), None)
                 if not match:
-                    print(f"Couldn't find '{target_name}' — capturing the first employee instead.")
+                    print(f"Couldn't find '{ph(target_name)}' — capturing the first employee instead.")
                     match = people[0]
             else:
                 match = people[0]
 
-            print(f"Capturing edit form for: {match['name']}  ({match['uuid']})")
+            print(f"Capturing edit form for: {ph(match['name'])}  ({pv(match['uuid'])})")
             await page.goto(f"{BASE_URL}/editemployee?id={match['uuid']}")
             await page.wait_for_load_state("networkidle")
             await page.wait_for_timeout(2500)
@@ -1062,7 +1065,7 @@ async def run_capture_datepicker(target_name=None):
                 key = normalize_name(target_name)
                 match = next((x for x in people if normalize_name(x["name"]) == key), None)
             match = match or people[0]
-            print(f"Opening edit form for {match['name']} ({match['uuid']})")
+            print(f"Opening edit form for {ph(match['name'])} ({pv(match['uuid'])})")
             await page.goto(f"{BASE_URL}/editemployee?id={match['uuid']}")
             await page.wait_for_load_state("networkidle")
             await page.wait_for_timeout(2000)
@@ -1192,7 +1195,7 @@ async def run(roster_path=None):
 
             print(f"\nMatched {len(resolved)}, unmatched {len(unmatched)}.")
             for row, label, info in unmatched:
-                print(f"  skip: {label} — {info}")
+                print(f"  skip: {ph(label)} — {info}")
 
             # Split the unmatched into the two piles Dane cares about:
             #   • "not in EMR" → genuinely-new hires to ADD manually.
@@ -1262,11 +1265,11 @@ async def run(roster_path=None):
                         changes = [(l, o, n, (persisted if l == "Date of Hire" else ok))
                                    for (l, o, n, ok) in changes]
                         if persisted:
-                            print(f"  ✓ Date of Hire verified: {actual}")
+                            print(f"  ✓ Date of Hire verified: {pv(actual)}")
                         else:
                             date_misses.append((label, doh, actual))
                             print(f"  ⚠ Date of Hire STILL not persisted (shows "
-                                  f"'{actual or 'blank'}') — logged for manual entry")
+                                  f"'{pv(actual) or 'blank'}') — logged for manual entry")
 
                     status = "updated" if saved else "save-failed"
                     log_rows(writer, label, uuid, matched_by, status, changes=changes)

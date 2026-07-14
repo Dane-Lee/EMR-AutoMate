@@ -30,6 +30,9 @@ import sys
 from playwright.async_api import async_playwright, Page
 from datetime import date, datetime
 
+import phi_redact
+from phi_redact import ph, pd  # ph(name) / pd(free text) — see PHI NOTE below
+
 # ─────────────────────────────────────────────
 # CONFIG — fill these in before running
 # ─────────────────────────────────────────────
@@ -42,9 +45,22 @@ from datetime import date, datetime
 #   "final"  — click the real Save automatically (finalizes the encounter). Careful.
 SAVE_MODE = "draft"
 
-# Set to True (during testing) to save a screenshot + page HTML at each step into
-# a ./debug folder. These captures let us fix selectors against the real EMR.
+# Set to True (during testing) to save page HTML at each step into a ./debug folder.
+# These captures let us fix selectors against the real EMR.
+#
+# PHI NOTE: captured HTML is run through phi_redact.scrub_html() before it is
+# written. Only known EMR UI strings survive; everything else — names, dates of
+# birth, identifiers, the free-text description — is replaced with a placeholder.
+# The debug folder is therefore safe to share (with an AI assistant, in a bug
+# report). See phi_redact.py for why this is an allowlist and not a denylist.
 DEBUG_CAPTURE = True
+
+# Screenshots are a separate, stricter switch. Redacting a PNG means painting over
+# regions we remembered to list (phi_redact.MASK_SELECTORS) — a denylist, so an
+# unlisted corner of the page could still show a name. HTML is what selector
+# debugging actually needs, so screenshots stay OFF unless you deliberately want
+# them. When on, the known PHI regions are masked, but treat the PNGs as sensitive.
+DEBUG_SCREENSHOTS = False
 
 BASE_URL = "https://aws.atiworksitesolutions.com"
 
@@ -198,6 +214,18 @@ CHECKBOX_UUID_MAP = {
     "Near Miss Education":                           {},  # no checkboxes
 }
 
+# ── PHI redaction vocabulary ──────────────────
+# Teach the scrubber every string the EMR form is *allowed* to show. Anything not
+# registered here (or in phi_redact's own chrome/field-option lists) is redacted out
+# of debug captures — which is precisely what keeps employee names from surviving.
+# If a debug capture hides a label you needed, register it here rather than
+# loosening the scrubber.
+phi_redact.register_vocab(ENCOUNTER_TYPES)
+phi_redact.register_vocab(WHAT_PROMPTED_OPTIONS)
+phi_redact.register_vocab(COACHING_TYPE_UUIDS)          # coaching type names
+for _group in CHECKBOX_UUID_MAP.values():
+    phi_redact.register_vocab(_group)                   # detail-checkbox labels
+
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -214,7 +242,11 @@ def name_pattern(full_name):
 
 
 async def snap(page: Page, label: str):
-    """Save a screenshot + the page's HTML to ./debug for selector debugging.
+    """Save the page's (PHI-redacted) HTML to ./debug for selector debugging.
+
+    The HTML is scrubbed before it touches the disk — raw page content is never
+    written. Screenshots are only taken if DEBUG_SCREENSHOTS is on, and then with
+    the known PHI regions masked out.
 
     No-op unless DEBUG_CAPTURE is True. Never raises — a capture failure should
     not interrupt the run.
@@ -226,10 +258,16 @@ async def snap(page: Page, label: str):
         os.makedirs(folder, exist_ok=True)
         ts = datetime.now().strftime("%H%M%S")
         base = os.path.join(folder, f"{ts}_{label}")
-        await page.screenshot(path=base + ".png", full_page=True)
-        html = await page.content()
+
+        # Scrub BEFORE writing: the raw HTML only ever exists in memory.
+        safe_html = phi_redact.scrub_html(await page.content())
         with open(base + ".html", "w", encoding="utf-8") as fh:
-            fh.write(html)
+            fh.write(safe_html)
+
+        if DEBUG_SCREENSHOTS:
+            await page.screenshot(path=base + ".png", full_page=True,
+                                  mask=phi_redact.screenshot_masks(page))
+
         print(f"  [debug] captured: {label}")
     except Exception as e:
         print(f"  [debug] capture failed for '{label}': {e}")
@@ -441,7 +479,7 @@ def prompt_encounter():
     print("\n──────────────────────────────────────────")
     print("  Review")
     print("──────────────────────────────────────────")
-    print(f"  Employee:       {employee}")
+    print(f"  Employee:       {ph(employee)}")
     print(f"  Date:           {date_of_encounter}")
     print(f"  Encounter type: {encounter_type}")
     if department:
@@ -456,7 +494,7 @@ def prompt_encounter():
     details = ", ".join(coaching_detail_types) if coaching_detail_types else "(none)"
     print(f"  Details:        {details}")
     if description:
-        print(f"  Description:    {description}")
+        print(f"  Description:    {pd(description)}")
     print(f"  Prompted by:    {what_prompted}")
     print("──────────────────────────────────────────")
 
@@ -484,13 +522,13 @@ async def fill_encounter(page: Page, ENCOUNTER):
     # matching doesn't handle the "Last, First" format, so we don't rely on it —
     # it's just a fallback to narrow the list if the direct match isn't found.
     full_name = ENCOUNTER["employee_search"].strip()
-    print(f"Locating employee: {full_name}")
+    print(f"Locating employee: {ph(full_name)}")
 
     pattern = name_pattern(full_name)
     rows = page.locator(".employee-list .details", has_text=pattern)
     if await rows.count() == 0:
         last_name = full_name.split(",")[0].strip()
-        print(f"  Not found directly — narrowing the list by '{last_name}'...")
+        print(f"  Not found directly — narrowing the list by '{ph(full_name)}'...")
         box = page.locator("input[placeholder='Search Employee or Identifier']")
         await box.click()
         await box.fill(last_name)
@@ -500,8 +538,10 @@ async def fill_encounter(page: Page, ENCOUNTER):
     await snap(page, "02_employee_list")
 
     if await rows.count() == 0:
+        # ph() so the name does not ride out on a traceback to stderr; on a real
+        # console it still renders as the actual name.
         raise RuntimeError(
-            f"Couldn't find employee '{full_name}'. Check spelling and the "
+            f"Couldn't find employee '{ph(full_name)}'. Check spelling and the "
             f"'Last, First' format, and that they exist in this worksite."
         )
 
@@ -750,7 +790,7 @@ def prepare_batch():
     print(f"\nFound {len(encounters)} encounter(s) in encounters.csv:")
     for i, enc in enumerate(encounters, 1):
         det = ", ".join(enc["coaching_detail_types"]) or "—"
-        print(f"  {i}. {enc['employee_search']}  |  {enc['coaching_type'] or '(no type)'}"
+        print(f"  {i}. {ph(enc['employee_search'])}  |  {enc['coaching_type'] or '(no type)'}"
               f"  |  {enc['date_of_encounter']}  |  {det}")
 
     if errors:
@@ -864,7 +904,7 @@ async def run_capture_fields(employee_name):
             await page.wait_for_load_state("networkidle")
 
             full_name = employee_name.strip()
-            print(f"Locating {full_name}...")
+            print(f"Locating {ph(full_name)}...")
             rows = page.locator(".employee-list .details", has_text=full_name)
             if await rows.count() == 0:
                 last = full_name.split(",")[0].strip()
@@ -874,7 +914,7 @@ async def run_capture_fields(employee_name):
                 await page.wait_for_timeout(1200)
                 rows = page.locator(".employee-list .details", has_text=full_name)
             if await rows.count() == 0:
-                print(f"Couldn't find '{full_name}'. Try a different name.")
+                print(f"Couldn't find '{ph(full_name)}'. Try a different name.")
                 return
             await rows.first.scroll_into_view_if_needed()
             await rows.first.click()
