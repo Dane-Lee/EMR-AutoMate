@@ -24,6 +24,7 @@ SEMI-AUTO MODE (recommended):
 import asyncio
 import csv
 import ctypes
+import json
 import os
 import re
 import sys
@@ -74,6 +75,35 @@ USER_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".brows
 # An AI (Claude/ChatGPT) transcribes your dictated notes into this file — see
 # TRANSCRIPTION_PROMPT.md for the exact column/value spec.
 ENCOUNTERS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encounters.csv")
+
+# The Department / Division / Category / Shift dropdown vocabularies, captured from the
+# live EMR form. These are validated up front so a bad value fails at the desk, with a
+# list of what's allowed — rather than silently mid-run, when react_select goes looking
+# for an option that was never there.
+FIELD_OPTIONS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "emr_field_options.json")
+
+
+def _load_field_options():
+    try:
+        with open(FIELD_OPTIONS_JSON, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception:
+        return {}  # no options file → skip these checks rather than block the run
+    # "Select" is the EMR's own empty-choice placeholder, not a real value.
+    return {field: [v for v in values if v and v != "Select"]
+            for field, values in raw.items()}
+
+
+FIELD_OPTIONS = _load_field_options()
+
+# CSV column -> the EMR field whose option list governs it.
+DROPDOWN_COLUMNS = {
+    "department": "Department",
+    "division": "Division",
+    "category": "Category",
+    "shift": "Shift",
+}
 
 # ─────────────────────────────────────────────
 # MENU OPTIONS — used by the on-screen questions
@@ -742,14 +772,34 @@ def row_to_encounter(row, line_no):
         errs.append(f"Row {line_no}: what_prompted '{what_prompted}' is not valid. "
                     f"Use one of: {' | '.join(WHAT_PROMPTED_OPTIONS)}")
 
+    # ── Dropdowns: Department / Division / Category / Shift ──
+    # Each is a separate EMR dropdown with a fixed list. A lead or supervisor puts the
+    # ROLE in department and the LINE in division ("line lead, weld" -> Line Lead /
+    # Weld) — they are never one combined value. Blank is always acceptable; a wrong
+    # value is not, so we name the allowed options rather than let it through.
+    dropdowns = {}
+    for col, field in DROPDOWN_COLUMNS.items():
+        val = get(col)
+        options = FIELD_OPTIONS.get(field, [])
+        if val.casefold() == "select":  # the EMR's placeholder = nothing chosen
+            val = ""
+        if val and options:
+            canonical = {o.casefold(): o for o in options}
+            if val.casefold() in canonical:
+                val = canonical[val.casefold()]  # accept 'line lead' -> 'Line Lead'
+            else:
+                errs.append(f"Row {line_no}: {col} '{val}' is not valid. "
+                            f"Use one of: {' | '.join(options)}  (or leave it blank)")
+        dropdowns[col] = val or None
+
     encounter = {
         "employee_search": employee,
         "date_of_encounter": date_val,
         "encounter_type": encounter_type,
-        "department": get("department") or None,
-        "division": get("division") or None,
-        "category": get("category") or None,
-        "shift": get("shift") or None,
+        "department": dropdowns["department"],
+        "division": dropdowns["division"],
+        "category": dropdowns["category"],
+        "shift": dropdowns["shift"],
         "coaching_type": coaching_type,
         "coaching_detail_types": details,
         "description": get("description"),
