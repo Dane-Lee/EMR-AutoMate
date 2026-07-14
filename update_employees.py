@@ -47,6 +47,8 @@ from playwright.async_api import async_playwright, Page
 # Reuse the proven helpers + config from the encounter tool (importing is safe — its
 # __main__ guard means nothing runs on import).
 import phi_redact
+from name_match import (NICKNAMES, loose_name, normalize_name,
+                        split_last_first)
 from phi_redact import ph, pv  # ph(name) / pv(field value) — PHI-safe stdout
 
 from ati_coaching_encounter import (
@@ -144,36 +146,11 @@ def _norm_header(h):
     return re.sub(r"[\s]+", "_", str(h or "").strip().lower())
 
 
-def normalize_name(s):
-    """Normalize a 'Last, First' name for matching: lowercase, collapse whitespace.
-
-    The EMR roster sometimes has doubled spaces (e.g. 'Doe,  Jane'), so we
-    collapse runs of whitespace and normalize the space after the comma.
-    """
-    s = str(s or "").strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"\s*,\s*", ", ", s)
-    return s
-
-
-# Generational suffixes stripped for loose matching (as whole words, optional dot).
-_SUFFIX_RE = re.compile(r"\b(?:jr|sr|ii|iii|iv|v)\b\.?", re.IGNORECASE)
-
-
-def loose_name(s):
-    """A forgiving normalization for the *fallback* name match.
-
-    The EMR stores names with embedded nicknames and suffixes that a roster's plain
-    'Last, First' won't equal, e.g. 'Skelton, Wilma "Sissy"', 'Larie Jr., William',
-    'Rex, Thomas "Tom"'. This strips quoted nicknames and generational suffixes so
-    those still resolve. Paired quotes only — a lone apostrophe (O'Brien) is left
-    intact. Used only after Identifier and exact-name matching have missed.
-    """
-    s = str(s or "")
-    s = re.sub(r'"[^"]*"', " ", s)          # drop "Nick"
-    s = re.sub(r"'[^']*'", " ", s)          # drop 'Nick' (needs a matching pair)
-    s = _SUFFIX_RE.sub(" ", s)              # drop Jr/Sr/II/III/IV/V
-    return normalize_name(s)
+# normalize_name / loose_name / split_last_first / NICKNAMES now live in
+# name_match.py, shared with the encounters tool. They used to be defined here,
+# where ati_coaching_encounter couldn't reach them — so it used a plain regex that
+# only matched nicknames which happen to be a PREFIX of the formal name ('Will' of
+# 'William'). 'Bill', 'Bob' and 'Peggy' silently failed. One copy, both tools.
 
 
 def norm_identifier(s):
@@ -587,45 +564,6 @@ def resolve_employee(row, index):
 # formal name or nickname, the First Name box must read  First "Nick"  (e.g.
 # 'James "Jim"'). This flags employees whose first name commonly has a nickname so Dane
 # can decide who needs that treatment. Curated common-US-name map (formal -> nicknames).
-NICKNAMES = {
-    "abigail": ["Abby"], "albert": ["Al", "Bert"], "alexander": ["Alex"],
-    "alexandra": ["Alex", "Lexi"], "andrew": ["Andy", "Drew"], "angela": ["Angie"],
-    "anthony": ["Tony"], "barbara": ["Barb"], "benjamin": ["Ben"], "bradley": ["Brad"],
-    "bradford": ["Brad"], "brandon": ["Bran"], "catherine": ["Cathy", "Kate", "Katie"],
-    "charles": ["Charlie", "Chuck"], "christina": ["Chris", "Tina"],
-    "christine": ["Chris"], "christopher": ["Chris"], "cynthia": ["Cindy"],
-    "daniel": ["Dan", "Danny"], "deborah": ["Deb", "Debbie"], "dennis": ["Denny"],
-    "donald": ["Don", "Donnie"], "douglas": ["Doug"], "edward": ["Ed", "Eddie"],
-    "elizabeth": ["Liz", "Beth", "Betty", "Lizzie"], "eugene": ["Gene"],
-    "frances": ["Fran"], "francis": ["Frank"], "franklin": ["Frank"],
-    "frederick": ["Fred"], "gerald": ["Jerry"], "gregory": ["Greg"],
-    "harold": ["Harry"], "henry": ["Hank", "Harry"], "jacob": ["Jake"],
-    "james": ["Jim", "Jimmy"], "jeffrey": ["Jeff"], "jennifer": ["Jen", "Jenny"],
-    "jessica": ["Jess"], "jonathan": ["Jon"], "joseph": ["Joe", "Joey"],
-    "joshua": ["Josh"], "katherine": ["Kate", "Katie", "Kathy"], "kathleen": ["Kathy"],
-    "kenneth": ["Ken", "Kenny"], "kimberly": ["Kim"], "lawrence": ["Larry"],
-    "leonard": ["Lenny", "Leo"], "margaret": ["Maggie", "Peggy", "Marge"],
-    "matthew": ["Matt"], "megan": ["Meg"], "melissa": ["Mel"], "michael": ["Mike"],
-    "michelle": ["Shelly"], "nathaniel": ["Nate"], "nicholas": ["Nick"],
-    "pamela": ["Pam"], "patricia": ["Pat", "Patty", "Trish"], "patrick": ["Pat"],
-    "peter": ["Pete"], "philip": ["Phil"], "phillip": ["Phil"], "rebecca": ["Becky"],
-    "richard": ["Rick", "Rich", "Dick"], "robert": ["Rob", "Bob", "Bobby"],
-    "ronald": ["Ron", "Ronnie"], "russell": ["Russ"], "samantha": ["Sam"],
-    "samuel": ["Sam"], "sandra": ["Sandy"], "stephanie": ["Steph"],
-    "stephen": ["Steve"], "steven": ["Steve"], "susan": ["Sue", "Susie"],
-    "theodore": ["Ted", "Teddy"], "theresa": ["Terry"], "teresa": ["Terry"],
-    "thomas": ["Tom", "Tommy"], "timothy": ["Tim"], "veronica": ["Ronnie"],
-    "victoria": ["Vicky"], "vincent": ["Vince"], "walter": ["Walt"],
-    "wesley": ["Wes"], "william": ["Bill", "Will", "Billy"], "zachary": ["Zach"],
-}
-
-
-def split_last_first(display_name):
-    """'Last, First Middle' -> (last, first_full). first_full keeps middle parts."""
-    last, _, first_full = display_name.partition(",")
-    return last.strip(), first_full.strip()
-
-
 def nickname_candidates(people):
     """From parsed roster people, flag those whose first name commonly has a nickname
     and isn't already in  First "Nick"  form. Returns a list of dicts.
