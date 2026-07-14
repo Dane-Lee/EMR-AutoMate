@@ -55,9 +55,13 @@ Write-Host "encounters.csv: $rows row(s), last modified $($info.LastWriteTime)" 
 
 # Run the real validator (the same one the automation uses, so a pass here means the
 # batch will actually run). Its error messages name the row number and the offending
-# controlled value — "Row 4: coaching_type 'Safety' is not valid" — and never an
-# employee name or a description, so this output is safe to show anyone.
-$env:EMR_REDACT_CONSOLE = "1"
+# dropdown value — "Row 4: coaching_type 'Safety' is not valid" — and suppress any
+# value too long to be a dropdown, which is how a misaligned row's clinical text would
+# otherwise leak out.
+#
+# Redaction is NOT forced here: phi_redact keys off stdout.isatty(), so Dane sees real
+# values in his terminal (he needs them to fix a row) while a captured run — an
+# assistant, a log pipe — gets them redacted automatically.
 python -c @"
 from ati_coaching_encounter import load_encounters_csv, ENCOUNTERS_CSV
 import sys
@@ -79,12 +83,9 @@ if ($Check) {
     exit 0
 }
 
-# Belt-and-braces: phi_redact already auto-redacts whenever stdout is not a
-# terminal, but set the flag explicitly so this stays safe even if someone runs the
-# script by hand in a console and pipes it somewhere later.
-$env:EMR_REDACT_CONSOLE = "1"
-
-Write-Host "Starting EMR AutoMate (console output is PHI-redacted)..." -ForegroundColor Cyan
+# No forced redaction flag: phi_redact decides from stdout.isatty(). Dane's own
+# terminal shows real names; an assistant or log pipe capturing this gets aliases.
+Write-Host "Starting EMR AutoMate..." -ForegroundColor Cyan
 
 # Straight into the encounters flow, skipping emr_automate.py's task chooser — this
 # script has already decided which task is running.

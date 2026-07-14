@@ -23,7 +23,12 @@
 [CmdletBinding()]
 param(
     # Print the CSV contents to the screen (PHI!). Off by default.
-    [switch]$Show
+    [switch]$Show,
+
+    # Add these rows to the existing encounters.csv instead of replacing it. Use when
+    # Copilot hands back a long batch in chunks — dictate 25, paste, dictate 25 more,
+    # paste with -Append.
+    [switch]$Append
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,47 +43,90 @@ if ([string]::IsNullOrWhiteSpace($raw)) {
 $header = "employee,date,encounter_type,department,division,category,shift,coaching_type,details,description,what_prompted"
 
 # ── 1. the CSV ────────────────────────────────────────────────────────────────
-# Prefer a fenced ```csv block; fall back to "from the header line to the first
-# blank line" if Copilot forgot the fence.
-$csv = $null
-$fenced = [regex]::Match($raw, '(?ms)```(?:csv)?\s*\r?\n\s*(employee,date,encounter_type.*?)\r?\n\s*```')
-if ($fenced.Success) {
-    $csv = $fenced.Groups[1].Value.Trim()
-} else {
-    $idx = $raw.IndexOf($header, [StringComparison]::OrdinalIgnoreCase)
-    if ($idx -ge 0) {
-        $tail = $raw.Substring($idx)
-        $lines = @()
-        foreach ($line in ($tail -split "\r?\n")) {
-            if ([string]::IsNullOrWhiteSpace($line) -and $lines.Count -gt 1) { break }
-            if ($line -match '^\s*```') { break }
-            $lines += $line
-        }
-        $csv = ($lines -join "`n").Trim()
+# Collect EVERY fenced csv block, not just the first. A long batch often comes back
+# split across several blocks ("...continued"), and taking only the first silently
+# dropped the rest — which is exactly how an 80-encounter batch arrived as 25.
+$dataRows = @()
+$blocks = [regex]::Matches($raw, '(?ms)```(?:csv)?\s*\r?\n\s*(employee,date,encounter_type.*?)\r?\n\s*```')
+foreach ($b in $blocks) {
+    foreach ($line in ($b.Groups[1].Value.Trim() -split "\r?\n")) {
+        if ($line -match '^\s*employee,date,encounter_type') { continue }  # repeated header
+        if ($line.Trim()) { $dataRows += $line }
     }
 }
 
-if (-not $csv) {
+# Fall back to "from the header line onward" if Copilot forgot the fence entirely.
+if ($dataRows.Count -eq 0) {
+    $idx = $raw.IndexOf($header, [StringComparison]::OrdinalIgnoreCase)
+    if ($idx -ge 0) {
+        foreach ($line in ($raw.Substring($idx) -split "\r?\n")) {
+            if ($line -match '^\s*```') { break }
+            if ($line -match '^\s*employee,date,encounter_type') { continue }
+            if (-not $line.Trim()) { if ($dataRows.Count) { break } else { continue } }
+            $dataRows += $line
+        }
+    }
+}
+
+if ($dataRows.Count -eq 0) {
     Write-Host "No CSV found in the clipboard." -ForegroundColor Red
     Write-Host "Expected a fenced ``````csv block starting with:" -ForegroundColor Yellow
     Write-Host "  $header"
     exit 1
 }
 
+if ($blocks.Count -gt 1) {
+    Write-Host "Found $($blocks.Count) CSV blocks in the reply - merged them." -ForegroundColor DarkGray
+}
+
+$csv = ($dataRows -join "`n")
+
 # Back up whatever was there before — never destroy a batch that might not be entered.
+# This is not paranoia: it is what saved an 80-row batch when a Copilot rerun came back
+# truncated to 25 and overwrote it.
+$existingRows = @()
 if (Test-Path .\encounters.csv) {
     Copy-Item .\encounters.csv .\encounters.bak.csv -Force
     Write-Host "Backed up previous encounters.csv -> encounters.bak.csv" -ForegroundColor DarkGray
+    if ($Append) {
+        $existingRows = @(Get-Content .\encounters.csv | Where-Object {
+            $_.Trim() -and $_ -notmatch '^\s*employee,date,encounter_type'
+        })
+    }
 }
 
+$allRows = $existingRows + $dataRows
+
 # UTF8 without BOM: Python's csv reader chokes on a BOM in the first column name.
+# NB: @($header) + $allRows, not ($header, $allRows) — the latter nests the array and
+# -join stringifies it into one space-separated line.
 [System.IO.File]::WriteAllText(
     (Join-Path $PSScriptRoot 'encounters.csv'),
-    ($csv + "`n"),
+    ((@($header) + $allRows) -join "`n") + "`n",
     (New-Object System.Text.UTF8Encoding $false))
 
-$rowCount = (@($csv -split "\r?\n") | Where-Object { $_.Trim() }).Count - 1
-Write-Host "Wrote encounters.csv: $rowCount row(s)" -ForegroundColor Cyan
+if ($Append) {
+    Write-Host ("Appended {0} row(s) to {1} existing -> encounters.csv now has {2}" -f `
+        $dataRows.Count, $existingRows.Count, $allRows.Count) -ForegroundColor Cyan
+} else {
+    Write-Host "Wrote encounters.csv: $($dataRows.Count) row(s)" -ForegroundColor Cyan
+}
+
+# A batch that suddenly shrinks is the signature of a truncated Copilot reply. Say so
+# loudly rather than letting it pass as a clean run.
+$prev = @($existingRows).Count
+if (-not $Append -and (Test-Path .\encounters.bak.csv)) {
+    $prev = @(Import-Csv .\encounters.bak.csv).Count
+    if ($prev -gt $dataRows.Count) {
+        Write-Host ""
+        Write-Host ("WARNING: the previous batch had {0} rows, this one has only {1}." -f `
+            $prev, $dataRows.Count) -ForegroundColor Red
+        Write-Host "Copilot may have truncated its reply. If you expected more, ask it to" -ForegroundColor Red
+        Write-Host "re-output the REST in a second block, then re-run with -Append." -ForegroundColor Red
+        Write-Host "The previous batch is intact in encounters.bak.csv." -ForegroundColor Red
+        Write-Host ""
+    }
+}
 
 if ($Show) { Write-Host ""; Write-Host $csv; Write-Host "" }
 
