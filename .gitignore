@@ -28,6 +28,11 @@ roster_dohfix.xlsx
 roster_dohtest.xlsx
 # Running log of newly-composed encounter descriptions (to merge into the worksheet)
 new_descriptions_for_library.csv
+# Text dump of the description workbook, so Copilot can read it (library_export.py).
+# Ignored for the same reason its source workbook is.
+description_library.md
+# Assessments Copilot parked for Dane to enter by hand (PHI)
+assessments_todo.md
 # Real employee data / notes dropped into the project folder (PII / PHI)
 *EMR_notes*
 Active Associates*.xlsx
