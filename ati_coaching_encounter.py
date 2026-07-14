@@ -32,6 +32,7 @@ from playwright.async_api import async_playwright, Page
 from datetime import date, datetime
 
 import emr_field_map
+import name_match
 import phi_redact
 from phi_redact import ph, pd  # ph(name) / pd(free text) — see PHI NOTE below
 
@@ -539,6 +540,101 @@ def prompt_encounter():
 # MAIN FLOW
 # ─────────────────────────────────────────────
 
+async def roster_names(page: Page):
+    """Every employee display name currently in the dashboard's .employee-list.
+
+    The dashboard preloads the whole worksite roster, so this is the full list. Each
+    row's text can carry extra lines (identifier, department); the display name is the
+    first line.
+    """
+    texts = await page.locator(".employee-list .details").all_inner_texts()
+    names = []
+    for t in texts:
+        lines = [ln.strip() for ln in (t or "").splitlines() if ln.strip()]
+        names.append(lines[0] if lines else "")
+    return names
+
+
+async def locate_employee(page: Page, full_name):
+    """Find one employee's row, tolerating nicknames. Raises if absent or ambiguous.
+
+    Dane dictates the name he uses out loud — "Thompson, Bill" — and the EMR holds the
+    formal one, "Thompson, William". The old strict regex only ever worked when the
+    nickname happened to be a PREFIX of the formal name ("Will"), which is why "Bill",
+    "Bob" and "Peggy" failed. name_match handles the rest.
+
+    Ambiguity is never resolved by guessing: if "Smith, Chris" could be Christopher or
+    Christina, this raises. Attaching an encounter to the wrong person's medical record
+    is a far worse outcome than stopping to ask.
+    """
+    # Fast path: the strict pattern, which already tolerates the EMR's spacing and
+    # trailing quoted nicknames.
+    pattern = name_pattern(full_name)
+    rows = page.locator(".employee-list .details", has_text=pattern)
+    if await rows.count() == 1:
+        await snap(page, "02_employee_list")
+        return rows.first
+
+    # Narrow the (long) list by surname first — the search box is a client-side filter.
+    last_name = full_name.split(",")[0].strip()
+    if last_name:
+        box = page.locator("input[placeholder='Search Employee or Identifier']")
+        await box.click()
+        await box.fill(last_name)
+        await page.wait_for_timeout(1200)
+
+    await snap(page, "02_employee_list")
+
+    candidates = await roster_names(page)
+    idx, how = name_match.find_matches(full_name, candidates)
+
+    if len(idx) == 1:
+        if how != "exact":
+            print(f"  Matched {ph(full_name)} -> {ph(candidates[idx[0]])}  ({how})")
+        return page.locator(".employee-list .details").nth(idx[0])
+
+    if len(idx) > 1:
+        options = " | ".join(ph(candidates[i]) for i in idx)
+        raise RuntimeError(
+            f"'{ph(full_name)}' is ambiguous — it matches {len(idx)} employees: "
+            f"{options}. Use the full formal name in encounters.csv so there's no doubt."
+        )
+
+    raise RuntimeError(
+        f"Couldn't find employee '{ph(full_name)}'. Check the spelling and the "
+        f"'Last, First' format, and that they're in this worksite."
+    )
+
+
+async def preflight_names(page: Page, encounters):
+    """Resolve every name in the batch BEFORE entering anything.
+
+    Without this, a bad name is only discovered when its turn comes — halfway through
+    an 80-encounter run, with a dialog to click for each one. Better to find out at the
+    start, while the CSV is still easy to fix.
+
+    Returns (matched, problems). Does not modify anything.
+    """
+    await page.goto(BASE_URL)
+    await page.wait_for_load_state("networkidle")
+    candidates = await roster_names(page)
+
+    matched, problems, seen = {}, [], set()
+    for enc in encounters:
+        nm = (enc.get("employee_search") or "").strip()
+        if not nm or nm in seen:
+            continue
+        seen.add(nm)
+        idx, how = name_match.find_matches(nm, candidates)
+        if len(idx) == 1:
+            matched[nm] = (candidates[idx[0]], how)
+        elif len(idx) > 1:
+            problems.append((nm, "ambiguous", [candidates[i] for i in idx]))
+        else:
+            problems.append((nm, "not found", []))
+    return matched, problems
+
+
 async def fill_encounter(page: Page, ENCOUNTER):
     """Fill and save a single coaching encounter (assumes already logged in)."""
     # ── BACK TO DASHBOARD ──────────────────────
@@ -555,28 +651,7 @@ async def fill_encounter(page: Page, ENCOUNTER):
     full_name = ENCOUNTER["employee_search"].strip()
     print(f"Locating employee: {ph(full_name)}")
 
-    pattern = name_pattern(full_name)
-    rows = page.locator(".employee-list .details", has_text=pattern)
-    if await rows.count() == 0:
-        last_name = full_name.split(",")[0].strip()
-        print(f"  Not found directly — narrowing the list by '{ph(full_name)}'...")
-        box = page.locator("input[placeholder='Search Employee or Identifier']")
-        await box.click()
-        await box.fill(last_name)
-        await page.wait_for_timeout(1200)
-        rows = page.locator(".employee-list .details", has_text=pattern)
-
-    await snap(page, "02_employee_list")
-
-    if await rows.count() == 0:
-        # ph() so the name does not ride out on a traceback to stderr; on a real
-        # console it still renders as the actual name.
-        raise RuntimeError(
-            f"Couldn't find employee '{ph(full_name)}'. Check spelling and the "
-            f"'Last, First' format, and that they exist in this worksite."
-        )
-
-    target = rows.first
+    target = await locate_employee(page, full_name)
     await target.scroll_into_view_if_needed()
     await target.click()
     await page.wait_for_load_state("networkidle")
@@ -959,10 +1034,48 @@ async def run():
 
 async def run_batch(page: Page, encounters):
     """Enter a fixed list of encounters from the CSV, reviewing each in turn."""
-    print(f"Entering {len(encounters)} encounter(s) from encounters.csv.")
+
+    # ── PRE-FLIGHT ─────────────────────────────
+    # Check every name against the roster before entering anything, so a nickname the
+    # EMR doesn't know surfaces now — not on encounter 61 of 80.
+    print("\nChecking every name against the roster first...")
+    matched, problems = await preflight_names(page, encounters)
+
+    nicknames = {n: v for n, v in matched.items() if v[1] != "exact"}
+    if nicknames:
+        print(f"\n{len(nicknames)} name(s) resolved via nickname/loose match:")
+        for spoken, (formal, how) in nicknames.items():
+            print(f"  {ph(spoken)}  ->  {ph(formal)}   ({how})")
+
+    if problems:
+        print(f"\n⚠ {len(problems)} name(s) could NOT be resolved:")
+        for spoken, why, options in problems:
+            if options:
+                print(f"  {ph(spoken)}  — {why}: {' | '.join(ph(o) for o in options)}")
+            else:
+                print(f"  {ph(spoken)}  — {why}")
+
+        affected = sum(1 for e in encounters
+                       if (e.get("employee_search") or "").strip()
+                       in {p[0] for p in problems})
+        print(f"\n  {affected} of {len(encounters)} encounter(s) use those names.")
+        print("  Fix them in encounters.csv (use the full formal name), or continue and")
+        print("  they'll be skipped.")
+
+        if not popup(f"{len(problems)} name(s) couldn't be matched to the roster, "
+                     f"affecting {affected} of {len(encounters)} encounter(s).\n\n"
+                     f"Continue anyway and skip them?\n"
+                     f"(No = stop, so you can fix encounters.csv first.)",
+                     yes_no=True, title="EMR AutoMate — unmatched names"):
+            print("Stopped. Nothing was entered — fix the names and run again.")
+            return
+    else:
+        print(f"All {len(matched)} name(s) matched the roster.")
+
+    print(f"\nEntering {len(encounters)} encounter(s) from encounters.csv.")
     for i, encounter in enumerate(encounters, 1):
         print(f"\n══ Encounter {i} of {len(encounters)}: "
-              f"{encounter['employee_search']} ══")
+              f"{ph(encounter['employee_search'])} ══")
         try:
             status = await fill_encounter(page, encounter)
         except Exception as e:
