@@ -995,6 +995,38 @@ def load_encounters_csv(path):
     return encounters, errors
 
 
+def batch_warnings(encounters):
+    """Soft warnings about a validated batch — things that pass validation but smell
+    like a transcription mistake. Returns a list of strings (empty if all clear).
+
+    These are NOT errors: a batch really can be all one coaching type. But when Dane
+    doesn't state the type, the transcriber tends to stamp ONE type on everything —
+    which is how 80 encounters got saved as the wrong type. A dominant-type warning
+    surfaces that here, before entry, instead of in the medical record.
+    """
+    from collections import Counter
+    warns = []
+    n = len(encounters)
+    if n == 0:
+        return warns
+
+    types = Counter(e.get("coaching_type") or "(blank)" for e in encounters)
+    top_type, top_n = types.most_common(1)[0]
+    if n >= 5 and top_n / n >= 0.8:
+        warns.append(
+            f"{top_n} of {n} encounters are '{top_type}'. If you didn't state a coaching "
+            f"type for each, the transcriber may have defaulted them all - check before "
+            f"entering.")
+
+    blank_shift = sum(1 for e in encounters if not e.get("shift"))
+    blank_cat = sum(1 for e in encounters if not e.get("category"))
+    if blank_shift == n and n >= 5:
+        warns.append(f"All {n} encounters have a blank Shift.")
+    if blank_cat == n and n >= 5:
+        warns.append(f"All {n} encounters have a blank Category.")
+    return warns
+
+
 def prepare_batch():
     """If encounters.csv exists, load + validate + confirm it.
 

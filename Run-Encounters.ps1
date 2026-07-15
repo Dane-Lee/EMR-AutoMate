@@ -63,7 +63,7 @@ Write-Host "encounters.csv: $rows row(s), last modified $($info.LastWriteTime)" 
 # values in his terminal (he needs them to fix a row) while a captured run — an
 # assistant, a log pipe — gets them redacted automatically.
 python -c @"
-from ati_coaching_encounter import load_encounters_csv, ENCOUNTERS_CSV
+from ati_coaching_encounter import load_encounters_csv, batch_warnings, ENCOUNTERS_CSV
 import sys
 encs, errors = load_encounters_csv(ENCOUNTERS_CSV)
 if errors:
@@ -72,6 +72,12 @@ if errors:
         print('  -', e)
     sys.exit(1)
 print(f'VALID - {len(encs)} encounter(s) ready to enter.')
+warns = batch_warnings(encs)
+if warns:
+    print()
+    print('CHECK THESE (not errors, but worth a look before entering):')
+    for w in warns:
+        print('  !', w)
 "@
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Fix encounters.csv and re-run. Nothing was entered." -ForegroundColor Red

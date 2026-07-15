@@ -17,6 +17,32 @@ But **never invent clinical content that wasn't said.** If something is garbled,
 it and mark it `[unclear: ...]` rather than guessing. A wrong detail in a medical
 record is worse than a missing one.
 
+## NEVER guess the coaching type. Ask.
+
+The `coaching_type` is the clinical classification of the encounter. It is the single
+most important field. **You must not default, assume, or infer it when Dane didn't say
+it.** Silently defaulting it once wrote the wrong type into 80 medical records.
+
+Before you produce any CSV:
+
+1. Go through the encounters and find every one where Dane did **not** clearly state a
+   coaching type (see the list below). Group means allowed: "the next ten were all
+   job-specific coaching" covers those ten.
+2. If **any** are missing a type, **STOP and ask Dane** — do not output the CSV yet.
+   List them back to him briefly and ask him to supply the coaching type, per encounter
+   or per group. For example:
+
+   > You didn't state a coaching type for encounters 4–9, 12, and 15–40. What were they?
+   > You can give me one type for a range ("15–40 were all job-specific coaching") or
+   > name them individually.
+
+3. Only once every encounter has a coaching type Dane actually gave you, produce the CSV.
+
+The same rule applies to **`shift`** and **`category`**: never invent them. Leave them
+blank if Dane didn't say them (blank is safe), and tell him in your reply which
+encounters have no shift/category so he can decide. Never fill a plausible-looking
+guess.
+
 ## Output exactly three sections, in this order
 
 ### 1. A CSV, in a fenced ```csv code block
@@ -107,7 +133,10 @@ Default to `Specialist Initiated` if not stated — Dane usually starts the conv
 `emr_field_options.json` by `make_copilot_prompt.py`, so they can never drift out of
 sync with the EMR. Don't paste them in by hand.)*
 
-**`coaching_type`** and its allowed **`details`**:
+**`coaching_type`** — must be one Dane actually stated (see "NEVER guess the coaching
+type" above). Never default it. `Relationship Development Encounter` in particular is
+NOT a fallback — use it only when Dane says the encounter was about building rapport /
+relationship development. Its allowed **`details`**:
 
 | coaching_type | allowed details |
 |---|---|
