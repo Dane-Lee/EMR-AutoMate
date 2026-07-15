@@ -1054,9 +1054,38 @@ def prepare_batch():
         print("\nNothing was entered. Correct the CSV and run again.")
         raise SystemExit(1)
 
-    if not popup(f"Found {len(encounters)} encounter(s) in encounters.csv.\n\n"
-                 "Enter them into the EMR now?", yes_no=True):
-        print("Okay — manual entry instead.")
+    # ── LAST-GATE COMPOSITION SUMMARY ──────────
+    # The confirmation used to show only a count, so a batch where every coaching type
+    # had been defaulted the same looked identical to a good one. Show WHAT is about to
+    # be entered — the coaching-type breakdown and date range — plus any soft warnings,
+    # right in the popup. This is the final human check before anything is written.
+    from collections import Counter
+    types = Counter(e["coaching_type"] or "(none)" for e in encounters)
+    dates = sorted({e["date_of_encounter"] for e in encounters if e["date_of_encounter"]})
+    warns = batch_warnings(encounters)
+
+    summary_lines = [f"About to enter {len(encounters)} encounter(s)."]
+    if dates:
+        span = dates[0] if len(dates) == 1 else f"{dates[0]} – {dates[-1]}"
+        summary_lines.append(f"Dates: {span}")
+    summary_lines.append("")
+    summary_lines.append("Coaching types:")
+    for t, c in types.most_common():
+        summary_lines.append(f"   {c:>3}  {t}")
+    if warns:
+        summary_lines.append("")
+        summary_lines.append("⚠ CHECK BEFORE ENTERING:")
+        for w in warns:
+            summary_lines.append(f"   • {w}")
+    summary_lines.append("")
+    summary_lines.append("Enter them into the EMR now?")
+
+    # Print it too (redaction-aware) so it's in the run log.
+    print("\n" + "\n".join(summary_lines))
+
+    if not popup("\n".join(summary_lines), yes_no=True,
+                 title="EMR AutoMate — confirm this batch"):
+        print("Okay — nothing entered.")
         return None
     return encounters
 
