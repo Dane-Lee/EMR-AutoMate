@@ -40,6 +40,9 @@ assessments_todo.md
 new_descriptions_todo.md
 # Previous encounters.csv, kept by Paste-Encounters.ps1 so a batch is never destroyed
 encounters.bak.csv
+# Per-run encounter audit log (real employee names + outcomes, PII/PHI). Review it
+# redacted with:  python ati_coaching_encounter.py --audit
+encounter_log.csv
 # Real employee data / notes dropped into the project folder (PII / PHI)
 *EMR_notes*
 Active Associates*.xlsx

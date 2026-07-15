@@ -78,6 +78,40 @@ USER_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".brows
 # TRANSCRIPTION_PROMPT.md for the exact column/value spec.
 ENCOUNTERS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encounters.csv")
 
+# Per-run audit log. Every encounter's outcome (saved / skipped / error / name not
+# matched) is appended here as it happens, so a run is reviewable AFTER the fact — the
+# gap that left 14 errors reconstructable only from redacted screenshots. It holds real
+# names, so it's PHI: gitignored, and reviewed via `--audit` (which redacts for anyone
+# but Dane). One file, appended across runs; the run_started column separates them.
+ENCOUNTER_LOG_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "encounter_log.csv")
+ENCOUNTER_LOG_COLUMNS = ["run_started", "logged_at", "row", "employee", "matched_to",
+                         "coaching_type", "date", "status", "note"]
+
+
+def log_encounter(run_started, row_no, employee, matched_to, coaching_type,
+                  enc_date, status, note=""):
+    """Append one outcome to the audit log. Never raises — logging must not break a run."""
+    try:
+        new_file = not os.path.exists(ENCOUNTER_LOG_CSV)
+        with open(ENCOUNTER_LOG_CSV, "a", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=ENCOUNTER_LOG_COLUMNS)
+            if new_file:
+                w.writeheader()
+            w.writerow({
+                "run_started": run_started,
+                "logged_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "row": row_no,
+                "employee": employee or "",
+                "matched_to": matched_to or "",
+                "coaching_type": coaching_type or "",
+                "date": enc_date or "",
+                "status": status,
+                "note": note or "",
+            })
+    except Exception as e:
+        print(f"  [audit] could not write log row: {e}")
+
 # The Department / Division / Category / Shift dropdown vocabularies, captured from the
 # live EMR form. These are validated up front so a bad value fails at the desk, with a
 # list of what's allowed — rather than silently mid-run, when react_select goes looking
@@ -1034,12 +1068,14 @@ async def run():
 
 async def run_batch(page: Page, encounters):
     """Enter a fixed list of encounters from the CSV, reviewing each in turn."""
+    run_started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # ── PRE-FLIGHT ─────────────────────────────
     # Check every name against the roster before entering anything, so a nickname the
     # EMR doesn't know surfaces now — not on encounter 61 of 80.
     print("\nChecking every name against the roster first...")
     matched, problems = await preflight_names(page, encounters)
+    unmatched_names = {p[0] for p in problems}
 
     nicknames = {n: v for n, v in matched.items() if v[1] != "exact"}
     if nicknames:
@@ -1073,23 +1109,67 @@ async def run_batch(page: Page, encounters):
         print(f"All {len(matched)} name(s) matched the roster.")
 
     print(f"\nEntering {len(encounters)} encounter(s) from encounters.csv.")
+    tally = {"saved": 0, "skipped": 0, "error": 0}
+    consecutive_errors = 0
+    CIRCUIT_BREAK = 5  # stop if this many form-fills fail back-to-back
     for i, encounter in enumerate(encounters, 1):
-        print(f"\n══ Encounter {i} of {len(encounters)}: "
-              f"{ph(encounter['employee_search'])} ══")
+        name = (encounter.get("employee_search") or "").strip()
+        ctype = encounter.get("coaching_type") or ""
+        edate = encounter.get("date_of_encounter") or ""
+
+        def record(status, note=""):
+            match_info = matched.get(name)
+            matched_to = match_info[0] if match_info else ""
+            log_encounter(run_started, i, name, matched_to, ctype, edate, status, note)
+
+        print(f"\n══ Encounter {i} of {len(encounters)}: {ph(name)} ══")
+
+        # A name the pre-flight already couldn't resolve: don't attempt it (it would
+        # just error on the dashboard, as all 14 did). Log and move on.
+        if name in unmatched_names:
+            why = next((p[1] for p in problems if p[0] == name), "name not matched")
+            print(f"  Skipped — {why}. Fix the name in encounters.csv.")
+            record("name-unmatched", why)
+            tally["skipped"] += 1
+            continue
+
         try:
             status = await fill_encounter(page, encounter)
         except Exception as e:
-            print(f"\n⚠ Error on this encounter: {e}")
+            # Auto-continue rather than block on a dialog. Everything is a draft and now
+            # audited, so an unattended batch should keep going, not freeze for hours on
+            # a popup nobody is there to click. The failure is captured for review.
+            msg = str(e).splitlines()[0] if str(e) else e.__class__.__name__
+            print(f"  ⚠ Error — skipped and logged: {ph(msg)}")
             await snap(page, "ERROR_state")
-            print("  (Screenshot + page HTML saved to ./debug.)")
-            if not popup("That encounter hit an error and was skipped.\n\n"
-                         "Continue with the next one?", yes_no=True):
+            record("error", msg)
+            tally["error"] += 1
+            consecutive_errors += 1
+            # A run of back-to-back failures means something systemic (login expired, a
+            # changed selector) — not bad data in one row. Stop rather than churn through
+            # the rest generating identical errors.
+            if consecutive_errors >= CIRCUIT_BREAK:
+                print(f"\n⚠ {CIRCUIT_BREAK} encounters failed in a row — stopping. This is"
+                      f" usually login expiring or the EMR changing. The rest are"
+                      f" untouched; fix the cause and re-run.")
                 break
             continue
+
+        consecutive_errors = 0
         if status == "quit":
             print("Stopping the batch here.")
+            record("quit", "user stopped the batch")
             break
-    print("\nBatch complete.")
+        record(status)
+        tally[status] = tally.get(status, 0) + 1
+
+    # ── SUMMARY ────────────────────────────────
+    print("\n── Batch complete ──")
+    print(f"  saved:   {tally.get('saved', 0)}")
+    print(f"  skipped: {tally.get('skipped', 0)}  (unmatched names / your skips)")
+    print(f"  errors:  {tally.get('error', 0)}")
+    print(f"\n  Full audit log: {os.path.basename(ENCOUNTER_LOG_CSV)}")
+    print(f"  Review it redacted with:  python {os.path.basename(__file__)} --audit")
 
 
 async def run_interactive(page: Page):
@@ -1199,8 +1279,55 @@ async def run_capture_fields(employee_name):
             await context.close()
 
 
+def review_audit(last_run_only=True):
+    """Print the encounter audit log. Names go through ph()/pd(), so on a captured
+    stdout (an assistant, a pipe) they show as 'Employee #1' — Dane sees the real names
+    in his own terminal. This is how a run can be reviewed without handing over PHI.
+    """
+    if not os.path.exists(ENCOUNTER_LOG_CSV):
+        print(f"No audit log yet ({os.path.basename(ENCOUNTER_LOG_CSV)} doesn't exist).")
+        return
+    with open(ENCOUNTER_LOG_CSV, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        print("Audit log is empty.")
+        return
+
+    if last_run_only:
+        latest = rows[-1]["run_started"]
+        rows = [r for r in rows if r["run_started"] == latest]
+        print(f"Most recent run: {latest}  ({len(rows)} encounter(s))\n")
+    else:
+        print(f"All runs: {len(rows)} encounter(s) total\n")
+
+    from collections import Counter
+    tally = Counter(r["status"] for r in rows)
+
+    # Problems first — that's what a review is for.
+    problems = [r for r in rows if r["status"] not in ("saved",)]
+    if problems:
+        print("Needs attention:")
+        for r in problems:
+            line = (f"  row {r['row']:>3}  {r['status']:<15} {ph(r['employee'])}"
+                    f"  [{r['coaching_type']}]")
+            # A note is free text, so ph() (which aliases a whole string as one name)
+            # is wrong for it. Notes we generate are short technical strings ('ambiguous',
+            # a selector timeout); on captured output, suppress any long enough to be a
+            # stray clinical fragment — same rule as _echo().
+            note = r["note"]
+            if note:
+                if phi_redact.console_redaction_on() and len(note) > 40:
+                    note = f"[{len(note)} chars withheld]"
+                line += f"  - {note}"
+            print(line)
+        print()
+    print("Totals: " + "  ".join(f"{s}={n}" for s, n in sorted(tally.items())))
+
+
 if __name__ == "__main__":
-    if "--capture-fields" in sys.argv:
+    if "--audit" in sys.argv:
+        review_audit(last_run_only="--all" not in sys.argv)
+    elif "--capture-fields" in sys.argv:
         i = sys.argv.index("--capture-fields")
         name = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
         if not name:
