@@ -47,6 +47,12 @@ encounter_log.csv
 *EMR_notes*
 Active Associates*.xlsx
 EMR Easy Enter Worksheets.xlsx
+# Work title -> Department/Division map, generated from the roster by
+# encounter_builder.py. Job titles + headcounts, no names — not PHI, but it is
+# roster-derived, and this file is Dane's to maintain locally.
+work_titles.csv
+# Which work titles / shifts the builder hides. Local UI state.
+builder_prefs.json
 # Stray / scratch files
 Untitled-*.txt
 

@@ -5,7 +5,9 @@
     want the batch entered but do NOT want to hand over any PHI.
 
     THE SPLIT
-        Copilot (cleared for PHI)  writes encounters.csv from your dictated notes.
+        encounter_builder.py       writes encounters.csv — you check names off the
+                                   roster and set the coaching once per group. It
+                                   runs on this PC and talks to nothing.
         This script                reads encounters.csv and drives the EMR.
         Claude (never sees PHI)    just runs this script.
 
@@ -42,7 +44,7 @@ Set-Location -Path $PSScriptRoot
 $csv = Join-Path $PSScriptRoot "encounters.csv"
 if (-not (Test-Path $csv)) {
     Write-Host "No encounters.csv found in $PSScriptRoot" -ForegroundColor Yellow
-    Write-Host "Dictate to M365 Copilot, copy its reply, then run:  .\Paste-Encounters.ps1"
+    Write-Host "Build one:  python encounter_builder.py   (check names off the roster)"
     Write-Host "Full steps: RUN_CHECKLIST.md  (or ask Claude: 'ready to enter')"
     exit 1
 }

@@ -5,67 +5,59 @@ The `.\` in front of each command is required.
 
 ---
 
-### 1 · Copy the prompt
-Open **`copilot_prompt.md`** → click in it → `Ctrl+A` → `Ctrl+C`
-
-### 2 · Paste into a **fresh** M365 Copilot chat
-New chat every day — an old one drifts and starts inventing column values.
-Copilot will acknowledge and wait for your notes.
-
-### 3 · Dictate your encounters
-Messy, out of order, run-on — all fine. It won't invent clinical content.
-Anything it couldn't make out comes back marked `[unclear: ...]` for you to fix.
-
-It replies with 3 sections: **CSV**, **ASSESSMENTS**, **NEW DESCRIPTIONS**.
-
-### 4 · Copy its **whole reply** (not just the CSV), then:
+### 1 · Open the builder
 ```powershell
-.\Paste-Encounters.ps1
+python encounter_builder.py
 ```
-Splits the reply up for you and validates it:
-- CSV → `encounters.csv` *(previous batch backed up, never lost)*
-- assessments → `assessments_todo.md` *(enter these by hand — tool can't yet)*
-- new descriptions → `new_descriptions_todo.md` *(fold keepers into the workbook)*
+*(or `python emr_automate.py` → **Build a Batch**)*
 
-> **Copy Copilot's reply immediately before running this.** The script reads whatever
-> is on your clipboard right then. If it says "No CSV found," you copied something
-> else in between — nothing is harmed, just re-copy and re-run.
+### 2 · Check off who you saw
+Filter by shift / work title, click names to check them. Filter + **Check all shown**
+takes a whole area in one go. Checks survive filter changes.
 
-### 5 · If it says INVALID
-It names the row and the allowed values. Paste that line straight back to Copilot →
-it fixes the row → copy the new reply → press **↑** in the terminal → Enter.
-Repeat until `VALID`. A bad batch cannot reach the EMR.
+### 3 · Set the coaching once per group
+Coaching type (it will not guess one for you), details, description — **Library…**
+holds your standard ones. Department & shift come from each person's roster record;
+switch to "Same for everyone" for a one-area sweep. **Add group to batch**, repeat.
 
-### 6 · Enter the batch
+### 4 · Write & enter
+The **Write & enter batch** button validates and offers to start the run.
+Previous `encounters.csv` is backed up first, never lost. By hand instead:
 ```powershell
-.\Run-Encounters.ps1
+.\Run-Encounters.ps1 -Check    # validate only, enter nothing
+.\Run-Encounters.ps1           # enter the batch
 ```
-Browser opens → log in → confirm the worksite → approve the batch. It fills the forms.
 
-### 7 · Finalize in the EMR
+### 5 · Click the browser dialogs
+Log in → confirm the worksite → approve the batch. It fills the forms. The console
+prints `Roster loaded: ~948 employee(s)` and then resolves every name **before**
+entering anything — a bad name is skipped, not guessed.
+
+### 6 · Finalize in the EMR
 Everything saved as **drafts** in the InProgress list. Nothing is a record until you
 review and finalize it there.
 
-### 8 · Mop up
-Check **`assessments_todo.md`** for anything needing manual entry.
+### 7 · Mop up
+```powershell
+python ati_coaching_encounter.py --audit
+```
+Anything skipped is listed with its row and reason.
+- **Unmatched name** → build a **one-person group** in the builder and enter just
+  that one. **Never re-run the same encounters.csv** — the other rows would draft
+  again as duplicates.
+- **Blank department** → map that work title once in `work_titles.csv`.
 
 ---
 
-## Handing step 6 to Claude
-Just say **"run the encounters."** Claude never opens the CSV, and the output comes back
-redacted — it sees `Employee #7 didn't match the roster`, not who that is.
-
-## After you add descriptions to the workbook
-```powershell
-python library_export.py
-python make_copilot_prompt.py
-```
-Regenerates `copilot_prompt.md` with the new descriptions baked in.
+## Handing step 4–5 to Claude
+Just say **"run the encounters."** Claude never opens the CSV, and the output comes
+back redacted — it sees `Employee #7 didn't match the roster`, not who that is.
 
 ## Common snags
 | What you see | What it means |
 |---|---|
-| `No CSV found in the clipboard` | You copied something else after Copilot's reply. Re-copy, re-run. |
-| `INVALID - Row N: ...` | Copilot used a value the EMR doesn't accept. Paste the error back to it. |
-| `encounters.csv: N row(s)` from an old date | A previous batch is still sitting there. Enter it, or let step 4 replace it (it backs it up first). |
+| `INVALID - Row N: ...` | A value the EMR doesn't accept. The builder can't produce one — a hand-edit can. Rebuild the row in the builder. |
+| `Roster loaded: 0 employee(s)` / "roster didn't load" | The dashboard wasn't ready — browser not logged in or worksite not selected. Fix in the browser, run again. Nothing was entered. |
+| `1 name(s) could NOT be resolved` | That person isn't in the EMR list under that name (new hire, spelling). Skipped safely; see Mop up. |
+| `encounters.csv: N row(s)` from an old date | A previous batch is still sitting there. Enter it, or write over it from the builder (it backs up first). |
 | Browser opens to a login page | Expected. Log in; it remembers you next time. |
