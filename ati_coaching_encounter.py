@@ -75,8 +75,11 @@ USER_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".brows
 # Batch input file. If this CSV exists next to the script, you'll be offered batch
 # mode: it reads each row, fills the form, and pauses for your review per encounter.
 # An AI (Claude/ChatGPT) transcribes your dictated notes into this file — see
-# TRANSCRIPTION_PROMPT.md for the exact column/value spec.
+# encounter_builder.py, which can only emit values the EMR accepts.
 ENCOUNTERS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encounters.csv")
+# Same backup file encounter_builder writes before it replaces a batch.
+ENCOUNTERS_BAK_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "encounters.bak.csv")
 
 # Per-run audit log. Every encounter's outcome (saved / skipped / error / name not
 # matched) is appended here as it happens, so a run is reviewable AFTER the fact — the
@@ -574,19 +577,53 @@ def prompt_encounter():
 # MAIN FLOW
 # ─────────────────────────────────────────────
 
+# The employee's display name, and nothing else. Each dashboard row is
+#   <div id="UUID" class="details..."> ... <span class="name">Last, First</span>
+#                                          <span class="badge-id"># 12345 - Title</span>
+# (the same structure update_employees._ROW_RE parses, verified against a saved
+# 938-row dashboard capture and used by the roster-update runs).
+_NAME_SEL = ".employee-list .details .name"
+
+
 async def roster_names(page: Page):
     """Every employee display name currently in the dashboard's .employee-list.
 
-    The dashboard preloads the whole worksite roster, so this is the full list. Each
-    row's text can carry extra lines (identifier, department); the display name is the
-    first line.
+    READ THE .name SPANS — never the row's rendered text.
+        An earlier version took each row's inner_text and assumed the display name was
+        its first line. But the name and badge are adjacent inline <span>s: how that
+        text wraps into "lines" is a CSS accident, and when it doesn't wrap the way the
+        code hoped, every candidate becomes junk like 'Doe, John# 12345 - Welder' and
+        every real name in the batch comes back "not found" — 77 of 77, names that
+        were sitting right there on the screen. The .name span is the EMR's own
+        definition of the display name; use it.
+
+    WAIT FOR THE LIST FIRST — also load-bearing.
+        all_inner_texts() does NOT auto-wait: it returns whatever is in the DOM at
+        that instant. The roster is React-rendered and lands AFTER `networkidle`, so
+        reading straight after page.goto() can return an empty list — downstream,
+        indistinguishable from "none of these people exist". Wait for rows to appear,
+        then for the count to stop growing.
     """
-    texts = await page.locator(".employee-list .details").all_inner_texts()
-    names = []
-    for t in texts:
-        lines = [ln.strip() for ln in (t or "").splitlines() if ln.strip()]
-        names.append(lines[0] if lines else "")
-    return names
+    try:
+        await page.wait_for_selector(_NAME_SEL, state="attached", timeout=30000)
+    except Exception:
+        return []          # caller decides what an empty roster means
+
+    # The list streams in; settle before reading, or we read a partial roster and
+    # "not found" a person who was simply still on their way.
+    previous, stable = -1, 0
+    for _ in range(40):
+        current = await page.locator(_NAME_SEL).count()
+        if current and current == previous:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+        previous = current
+        await page.wait_for_timeout(250)
+
+    return [t.strip() for t in await page.locator(_NAME_SEL).all_inner_texts()]
 
 
 async def locate_employee(page: Page, full_name):
@@ -623,8 +660,18 @@ async def locate_employee(page: Page, full_name):
     idx, how = name_match.find_matches(full_name, candidates)
 
     if len(idx) == 1:
+        formal = candidates[idx[0]]
         if how != "exact":
-            print(f"  Matched {ph(full_name)} -> {ph(candidates[idx[0]])}  ({how})")
+            print(f"  Matched {ph(full_name)} -> {ph(formal)}  ({how})")
+        # Select the row CONTAINING that exact name span. An index into the names
+        # list only maps back to the right row if every row has exactly one name
+        # span — content can't misalign. (find_matches already raised on duplicates,
+        # so an exact-text filter is unambiguous here.)
+        row = page.locator(".employee-list .details").filter(
+            has=page.locator(".name", has_text=re.compile(
+                rf"^\s*{re.escape(formal)}\s*$")))
+        if await row.count() >= 1:
+            return row.first
         return page.locator(".employee-list .details").nth(idx[0])
 
     if len(idx) > 1:
@@ -653,6 +700,17 @@ async def preflight_names(page: Page, encounters):
     await page.wait_for_load_state("networkidle")
     candidates = await roster_names(page)
 
+    # An empty roster is a LOAD failure, not 77 bad names. Reporting it as unmatched
+    # names sends Dane to fix a CSV that was never wrong. Distinguish the two: no
+    # candidates at all means the dashboard didn't render (or the worksite isn't
+    # selected), so say that and enter nothing.
+    if not candidates:
+        return {}, "roster-empty"
+
+    # Count only — PHI-safe — and exactly the number you need when a batch reports
+    # unmatched names: it says whether the comparison list was sane.
+    print(f"  Roster loaded: {len(candidates)} employee(s) on the dashboard.")
+
     matched, problems, seen = {}, [], set()
     for enc in encounters:
         nm = (enc.get("employee_search") or "").strip()
@@ -669,12 +727,56 @@ async def preflight_names(page: Page, encounters):
     return matched, problems
 
 
+async def _looks_logged_out(page: Page) -> bool:
+    """Is the page showing the login screen? (Same probe update_employees uses.)"""
+    try:
+        if await page.get_by_text("Login to your account").count() > 0:
+            return True
+        if await page.get_by_role("button", name="Login", exact=True).count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def open_dashboard(page: Page) -> bool:
+    """Go to the dashboard with the roster loaded, recovering from an expired session.
+
+    The batch's #1 failure mode is the EMR session timing out mid-run: every later
+    page.goto() silently lands on the login screen, where there is no employee row and
+    no search box — so the next click sits for its full 30s timeout and dies. Five of
+    those in a row trips the circuit breaker and the rest of the batch never runs.
+    (Exactly how a 77-row batch stopped at 35.)
+
+    So: detect the login screen, pause for Dane to log back in, and retry. Returns
+    True once the roster is actually on screen.
+    """
+    for _ in range(4):
+        await page.goto(BASE_URL)
+        await page.wait_for_load_state("networkidle")
+        try:
+            await page.wait_for_selector(_NAME_SEL, state="attached", timeout=15000)
+            return True
+        except Exception:
+            pass
+        if await _looks_logged_out(page):
+            popup("Your ATI session has logged out.\n\nLog back in in the browser "
+                  "(and make sure the worksite is selected), then click OK to "
+                  "carry on with the batch — it picks up where it left off.",
+                  title="EMR AutoMate — session expired")
+            continue  # retry the navigation after re-login
+        await page.wait_for_timeout(1500)  # transient slow load — try once more
+    return False
+
+
 async def fill_encounter(page: Page, ENCOUNTER):
     """Fill and save a single coaching encounter (assumes already logged in)."""
     # ── BACK TO DASHBOARD ──────────────────────
-    # Reset to the home screen so the employee search box is available.
-    await page.goto(BASE_URL)
-    await page.wait_for_load_state("networkidle")
+    # Reset to the home screen so the employee search box is available. Guarded: an
+    # expired session must pause for re-login, not burn a 30s click timeout per row.
+    if not await open_dashboard(page):
+        raise RuntimeError("The dashboard/roster didn't load — session or connection. "
+                           "Nothing was entered for this row.")
     await snap(page, "01_dashboard")
 
     # ── FIND EMPLOYEE ──────────────────────────
@@ -930,11 +1032,11 @@ def row_to_encounter(row, line_no):
     for col in ("category", "shift"):
         dropdowns[col] = _exact_option(DROPDOWN_COLUMNS[col], get(col), col, line_no, errs)
 
-    # Department and Division are different: Dane dictates the work area the way he
+    # Department and Division are different: a work area may arrive the way Dane
     # says it out loud — "Finishers", "THT", "line lead, weld", "station 85" — and
     # emr_field_map exists precisely to turn that phrasing into the EMR's vocabulary.
     # So anything that isn't already an exact option goes through the mapper rather
-    # than being rejected. Expecting the transcriber to memorise 49 department names
+    # than being rejected. Expecting an upstream tool to memorise 49 department names
     # is what produced 71 near-miss values in a single batch.
     department = _exact_option("Department", get("department"), "department", line_no, [])
     division = _exact_option("Division", get("division"), "division", line_no, [])
@@ -996,13 +1098,13 @@ def load_encounters_csv(path):
 
 
 def batch_warnings(encounters):
-    """Soft warnings about a validated batch — things that pass validation but smell
-    like a transcription mistake. Returns a list of strings (empty if all clear).
+    """Soft warnings about a validated batch — things that pass validation but are
+    worth an eyeball. Returns a list of strings (empty if all clear).
 
-    These are NOT errors: a batch really can be all one coaching type. But when Dane
-    doesn't state the type, the transcriber tends to stamp ONE type on everything —
-    which is how 80 encounters got saved as the wrong type. A dominant-type warning
-    surfaces that here, before entry, instead of in the medical record.
+    These are NOT errors. A batch really can be all one coaching type — a sweep day
+    built in encounter_builder legitimately is. But a uniform type has also meant a
+    tool silently defaulting it (that once put the wrong type on 80 records), so it
+    gets said out loud here, before entry, instead of in the medical record.
     """
     from collections import Counter
     warns = []
@@ -1014,9 +1116,8 @@ def batch_warnings(encounters):
     top_type, top_n = types.most_common(1)[0]
     if n >= 5 and top_n / n >= 0.8:
         warns.append(
-            f"{top_n} of {n} encounters are '{top_type}'. If you didn't state a coaching "
-            f"type for each, the transcriber may have defaulted them all - check before "
-            f"entering.")
+            f"{top_n} of {n} encounters are '{top_type}'. Fine if you built them as "
+            f"one sweep - if not, check before entering.")
 
     blank_shift = sum(1 for e in encounters if not e.get("shift"))
     blank_cat = sum(1 for e in encounters if not e.get("category"))
@@ -1025,6 +1126,97 @@ def batch_warnings(encounters):
     if blank_cat == n and n >= 5:
         warns.append(f"All {n} encounters have a blank Category.")
     return warns
+
+
+def _last_run_saved_keys():
+    """{(employee, date, coaching_type)} that the MOST RECENT run confirmed saved.
+
+    Keyed by content, not by row number: a resumed encounters.csv is renumbered, so
+    row indices from an older run would point at the wrong people. Content keys also
+    make --resume idempotent — run it twice and the second pass finds those rows
+    already gone, instead of eating a different 35.
+    """
+    if not os.path.exists(ENCOUNTER_LOG_CSV):
+        return set(), None
+    with open(ENCOUNTER_LOG_CSV, newline="", encoding="utf-8") as fh:
+        rows = [r for r in csv.DictReader(fh) if r.get("run_started")]
+    if not rows:
+        return set(), None
+    last = max(r["run_started"] for r in rows)
+    keys = {(r["employee"], r["date"], r["coaching_type"])
+            for r in rows if r["run_started"] == last and r["status"] == "saved"}
+    return keys, last
+
+
+def resume_batch():
+    """Rewrite encounters.csv to only the rows the last run did NOT save.
+
+    A run can stop early — a timed-out session, the circuit breaker — leaving the
+    batch half entered. Re-running the same file would draft the saved ones a second
+    time, so this drops them and leaves the remainder.
+
+    Only rows the audit log records as CONFIRMED saved are dropped. A row that errored
+    is kept: the debug captures show those die before the form is reached, so they
+    entered nothing. Counts only are printed — never a name.
+    """
+    if not os.path.exists(ENCOUNTERS_CSV):
+        sys.exit("No encounters.csv to resume.")
+
+    saved_keys, run_started = _last_run_saved_keys()
+    if not saved_keys:
+        print("The audit log has no confirmed-saved rows for the last run.")
+        print("Nothing to drop — encounters.csv is left exactly as it is.")
+        return
+
+    encounters, errors = load_encounters_csv(ENCOUNTERS_CSV)
+    if errors:
+        sys.exit(f"encounters.csv has {len(errors)} validation problem(s) — "
+                 f"fix those first (.\\Run-Encounters.ps1 -Check).")
+
+    # Raw CSV rows, skipping blanks exactly as load_encounters_csv does, so index i
+    # of `raw` is the same encounter as index i of `encounters`.
+    with open(ENCOUNTERS_CSV, newline="", encoding="utf-8-sig") as fh:
+        raw = [r for r in csv.DictReader(fh)
+               if any((v or "").strip() for v in r.values())]
+    if len(raw) != len(encounters):
+        sys.exit("Couldn't line up encounters.csv rows with the validator — "
+                 "not touching the file.")
+
+    keep, dropped = [], 0
+    for row, enc in zip(raw, encounters):
+        key = (enc.get("employee_search") or "",
+               enc.get("date_of_encounter") or "",
+               enc.get("coaching_type") or "")
+        if key in saved_keys:
+            dropped += 1
+        else:
+            keep.append(row)
+
+    print(f"Last run: {run_started}")
+    print(f"  confirmed saved in that run : {len(saved_keys)}")
+    print(f"  rows in encounters.csv      : {len(raw)}")
+    print(f"  dropping (already saved)    : {dropped}")
+    print(f"  keeping (still to enter)    : {len(keep)}")
+
+    if not keep:
+        print("\nEverything in this batch is already saved. Nothing left to enter.")
+        return
+    if not dropped:
+        print("\nNone of these rows match the last run's saved list — file unchanged.")
+        return
+
+    with open(ENCOUNTERS_BAK_CSV, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.DictWriter(fh, fieldnames=CSV_COLUMNS, quoting=csv.QUOTE_ALL)
+        w.writeheader()
+        w.writerows(raw)
+    with open(ENCOUNTERS_CSV, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.DictWriter(fh, fieldnames=CSV_COLUMNS, quoting=csv.QUOTE_ALL)
+        w.writeheader()
+        w.writerows(keep)
+
+    print(f"\nFull batch backed up to {os.path.basename(ENCOUNTERS_BAK_CSV)}.")
+    print(f"encounters.csv now holds the {len(keep)} row(s) still to enter.")
+    print("\nEnter them with:  .\\Run-Encounters.ps1")
 
 
 def prepare_batch():
@@ -1136,6 +1328,22 @@ async def run_batch(page: Page, encounters):
     # EMR doesn't know surfaces now — not on encounter 61 of 80.
     print("\nChecking every name against the roster first...")
     matched, problems = await preflight_names(page, encounters)
+
+    # preflight_names returns problems == "roster-empty" when the dashboard roster
+    # never rendered. That is NOT a batch of bad names — it's a load/login/worksite
+    # problem — so don't offer to "skip them" and enter nothing.
+    if problems == "roster-empty":
+        print("\n⚠ The employee roster didn't load — the dashboard came back empty.")
+        print("  This is NOT a problem with your names. Nothing was entered.")
+        popup(
+            "The employee roster didn't load, so no names could be checked.\n\n"
+            "This is a page-load problem, not a problem with your encounters. "
+            "Usually it means the browser isn't logged in yet, or the worksite "
+            "(e.g. Navarre) isn't selected at the top.\n\n"
+            "Fix that in the browser, then run the batch again. Nothing was entered.",
+            title="EMR AutoMate — roster didn't load")
+        return
+
     unmatched_names = {p[0] for p in problems}
 
     nicknames = {n: v for n, v in matched.items() if v[1] != "exact"}
@@ -1388,6 +1596,8 @@ def review_audit(last_run_only=True):
 if __name__ == "__main__":
     if "--audit" in sys.argv:
         review_audit(last_run_only="--all" not in sys.argv)
+    elif "--resume" in sys.argv:
+        resume_batch()
     elif "--capture-fields" in sys.argv:
         i = sys.argv.index("--capture-fields")
         name = sys.argv[i + 1] if len(sys.argv) > i + 1 else None

@@ -8,17 +8,14 @@ drives a real browser; there are no AI/API calls anywhere in the runtime.
 
 **You are GitHub Copilot. You are not cleared for PHI in this project.**
 
-Dane is cleared to give patient data to **Microsoft 365 Copilot** — a different
-product, licensed and governed separately. That clearance does **not** extend to you.
-Until Dane confirms otherwise in writing, treat yourself exactly like Claude Code:
+Treat yourself exactly like Claude Code:
 
 > **Never read, write, request, or repeat patient data.**
 
 If Dane pastes real encounter notes, employee names, dates of birth, or clinical
-details into this chat, **stop and tell him** that GitHub Copilot is not the cleared
-tool and that this belongs in M365 Copilot (see `M365_WORKFLOW.md`). Don't just
-quietly help — the whole safety model here depends on PHI not landing in the wrong
-assistant.
+details into this chat, **stop and tell him** — this project has no AI-facing PHI
+path at all, and the whole safety model depends on PHI not landing in an assistant.
+Don't just quietly help.
 
 ### Never open these files
 
@@ -26,10 +23,10 @@ They hold employee names, dates of birth, identifiers, or clinical notes:
 
 ```
 encounters.csv              encounters.bak.csv       roster.xlsx
-pa_follow_ups.csv           description_library.md   copilot_prompt.md
-assessments_todo.md         employee_updates_log.csv date_of_hire_todo.csv
-new_descriptions_for_library.csv                     emr_not_in_roster.csv
-roster_not_in_emr.csv       identifier_shortened.csv gender_review_needed.csv
+encounter_log.csv           pa_follow_ups.csv        employee_updates_log.csv
+assessments_todo.md         date_of_hire_todo.csv    emr_not_in_roster.csv
+new_descriptions_for_library.csv                     identifier_shortened.csv
+roster_not_in_emr.csv       gender_review_needed.csv
 roster_*.xlsx               *EMR_notes*
 "EMR Easy Enter Worksheets.xlsx"                     "Active Associates*.xlsx"
 ```
@@ -44,7 +41,8 @@ file has ever been committed in this repo's history; keep it that way.
 
 Everything that isn't PHI — which is most of the work:
 
-- write and refactor the automation (`ati_coaching_encounter.py`, `update_employees.py`)
+- write and refactor the automation (`encounter_builder.py`,
+  `ati_coaching_encounter.py`, `update_employees.py`)
 - fix selectors using `debug/*.html`, which are **scrubbed before they're written**
   (`phi_redact.scrub_html()` — allowlist, so no name can survive)
 - run `.\Run-Encounters.ps1 -Check`, whose errors name row numbers and controlled
@@ -53,16 +51,19 @@ Everything that isn't PHI — which is most of the work:
 If you add a print statement that could carry PHI, route it through `phi_redact`:
 `ph(name)` · `pv(field value)` · `pd(free text)`. See `CLAUDE.md`.
 
-## How the PHI step actually happens
+## Don't guess at what you can't see
 
-M365 Copilot converts Dane's dictation to CSV text; a helper script lands it in
-`encounters.csv`; the automation enters it. You are not in that loop.
+Every serious bug this project shipped came from an assistant guessing at something it
+couldn't see and writing the guess into a docstring as fact — the EMR's roster row
+shape, the description workbook's columns, the screen size. All three reached real
+medical records. If you can't verify it, measure it with an aggregate probe (counts
+only, never cell contents) or ask Dane. See `CLAUDE.md`.
 
-Full workflow: `M365_WORKFLOW.md`.
+## How a batch is built
 
-## If GitHub Copilot ever does get cleared
+Dane checks names off the roster in `encounter_builder.py`, which can only emit values
+the EMR accepts; the automation enters them as drafts. There is no dictation and no AI
+in the pipeline. The old M365 Copilot intake was removed 2026-07-16 — don't
+reintroduce it.
 
-Then this file gets rewritten and `.github/prompts/encounters.prompt.md` becomes live —
-it already contains the full spec for doing the CSV build in-editor. Until Dane
-confirms that clearance, treat that prompt file as **dormant** and don't run it on real
-notes.
+Full workflow: `WORKFLOW.md`.

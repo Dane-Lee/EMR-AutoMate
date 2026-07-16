@@ -19,6 +19,8 @@ import sys
 from datetime import datetime
 
 import emr_field_map as fm
+import phi_redact  # noqa: F401 — importing arms redaction on a captured stdout
+from phi_redact import ph  # ph(name) -> 'Employee #1' unless Dane's own terminal
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(_HERE, "encounters.csv")
@@ -106,13 +108,13 @@ def import_mobile(json_path, out_path=None):
         etype = (r.get("encounterType") or "").strip()
         coaching = MOBILE_COACHING_MAP.get(etype.lower(), "")
         if etype and not coaching:
-            warnings.append(f"{name}: unmapped encounterType '{etype}'")
+            warnings.append(f"{ph(name)}: unmapped encounterType '{etype}'")
         # Department/Division from the station (fall back to department), via the engine.
         dept, div = fm.resolve(r.get("station") or "")
         if not dept:
             dept, div = fm.resolve(r.get("department") or "")
         if not dept and (r.get("station") or r.get("department")):
-            warnings.append(f"{name}: station/department "
+            warnings.append(f"{ph(name)}: station/department "
                             f"'{r.get('station') or r.get('department')}' didn't resolve")
         rows.append({
             "employee": first_last_to_last_first(name),
@@ -144,7 +146,8 @@ if __name__ == "__main__":
     rows, warnings = import_mobile(sys.argv[1])
     print(f"Wrote {len(rows)} row(s) to {OUT}")
     for row in rows:
-        print(f"  {row['employee']:<20} {row['coaching_type'] or '(no type)':<40} "
+        # ph(): real names in Dane's terminal, 'Employee #1' when captured.
+        print(f"  {ph(row['employee']):<20} {row['coaching_type'] or '(no type)':<40} "
               f"{row['department'] or '(no dept)'} | {row['date']}")
     for w in warnings:
         print("  note:", w)

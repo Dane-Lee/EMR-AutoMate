@@ -1,8 +1,12 @@
 # Employee Roster Update — Spreadsheet Format Spec
 
 This describes the `roster.xlsx` file that `update_employees.py` reads to update
-employee **file information** in the ATI EMR. Counterpart to
-[TRANSCRIPTION_PROMPT.md](TRANSCRIPTION_PROMPT.md).
+employee **file information** in the ATI EMR. The encounter side of the tool is
+`encounter_builder.py` — see [WORKFLOW.md](WORKFLOW.md).
+
+`roster.xlsx` is also what `encounter_builder.py` reads to list people: it takes each
+row's `name`, and parses the work title and shift back out of `new_identifier`
+(`ID-Title-Shift`). So the identifier format below is load-bearing for both tools.
 
 > **Field set (Dane, 2026-06-29): Name, Identifier, Date of Hire.** Identifier format
 > (2026-06-30): **`ID-Title-Shift`**, e.g. `12345-Technician II-2nd`.
