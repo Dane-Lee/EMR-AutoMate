@@ -47,14 +47,18 @@ encounter_log.csv
 *EMR_notes*
 Active Associates*.xlsx
 EMR Easy Enter Worksheets.xlsx
-# Work title -> Department/Division map, generated from the roster by
-# encounter_builder.py. Job titles + headcounts, no names — not PHI, but it is
-# roster-derived, and this file is Dane's to maintain locally.
+# Backups of roster.xlsx (real roster PII), like roster.xlsx itself.
+roster.*backup.xlsx
+# Retired: the builder now reads Department/Division from the roster directly, so it
+# no longer generates this. Kept ignored so any leftover copy can't be committed.
 work_titles.csv
 # Which work titles / shifts the builder hides. Local UI state.
 builder_prefs.json
 # Stray / scratch files
 Untitled-*.txt
+# Office lock files (e.g. ~$Active Associates....xlsx) — created while a workbook is
+# open. Their names can echo a PHI filename, so keep them out of the tree entirely.
+~$*
 
 # ── Python ──
 __pycache__/
