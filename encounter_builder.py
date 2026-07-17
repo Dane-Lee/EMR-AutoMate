@@ -13,15 +13,12 @@ mis-transcribed.
 WHERE EACH PERSON'S DEPARTMENT AND SHIFT COME FROM
     A group is not always one department. "High heat index" job coaching goes to
     people scattered across weld, assembly and the paint line — so a single group-level
-    Department would be wrong for most of them. import_hc_roster composes roster.xlsx's
-    `new_identifier` as 'ID-Title-Shift' (e.g. '12345-Technician II-2nd'), so each
-    person's job title and shift are already in the roster. Parse them back out and
-    every row can carry that person's OWN department and shift, while the coaching is
-    still set once for the whole group.
-
-    WORK_TITLE_MAP only knows the shop-floor titles. Every other title is written to
-    work_titles.csv for Dane to map once; anything he fills in wins. Unmapped means a
-    blank department, which is safe — a wrong one is not.
+    Department would be wrong for most of them. roster.xlsx carries each person's OWN
+    department and division (Dane set them by hand for every employee), plus their shift
+    (parsed from `new_identifier`, which import_hc_roster composes as 'ID-Title-Shift').
+    So every row in a group carries that person's real work area, while the coaching is
+    still set once for the whole group. A person with no department set just gets a
+    blank one, which is safe — a wrong one is not.
 
 Every controlled value is picked from the SAME tables the validator and the EMR driver
 use (imported from ati_coaching_encounter, never copied), so anything this writes is a
@@ -62,7 +59,6 @@ ROSTER_XLSX = os.path.join(_HERE, "roster.xlsx")
 OUT_CSV = os.path.join(_HERE, "encounters.csv")
 BAK_CSV = os.path.join(_HERE, "encounters.bak.csv")
 LIBRARY_XLSX = os.path.join(_HERE, "EMR Easy Enter Worksheets.xlsx")
-TITLES_CSV = os.path.join(_HERE, "work_titles.csv")
 PREFS_JSON = os.path.join(_HERE, "builder_prefs.json")
 
 # No default. An unset coaching type blocks the group — see the module docstring.
@@ -70,8 +66,6 @@ PICK_ONE = "— pick one —"
 BLANK = ""
 
 COACHING_TYPES = sorted(ace.COACHING_TYPE_UUIDS)
-VALID_DEPTS = set(ace.FIELD_OPTIONS.get("Department", []))
-VALID_DIVS = set(ace.FIELD_OPTIONS.get("Division", []))
 
 # format_identifier composes '-'.join([id, title, shift]). The ID may carry a '-NN'
 # suffix and the shift is a closed vocabulary, so anchor both ends and take the middle.
@@ -87,74 +81,21 @@ def parse_new_identifier(ident):
 
 
 # ─────────────────────────────────────────────
-# WORK TITLE -> DEPARTMENT / DIVISION
-# ─────────────────────────────────────────────
-
-def sync_title_file(titles, path=None):
-    """Keep work_titles.csv in step with the roster; return {title: (dept, div)}.
-
-    emr_field_map.WORK_TITLE_MAP covers the shop-floor titles and nothing else — a real
-    roster has ~32. Rather than guess the rest (a wrong department is worse than none),
-    every title is listed here with its people-count, pre-filled where WORK_TITLE_MAP
-    already knows it, blank otherwise. Dane fills the blanks in once and they win from
-    then on.
-
-    Existing rows are never overwritten — new titles are appended, gone ones dropped.
-    Titles and counts only, no names: this file carries no PHI.
-    """
-    path = path or TITLES_CSV
-    existing = {}
-    if os.path.exists(path):
-        with open(path, newline="", encoding="utf-8-sig") as fh:
-            for row in csv.DictReader(fh):
-                title = (row.get("work_title") or "").strip()
-                if title:
-                    existing[title] = ((row.get("department") or "").strip(),
-                                       (row.get("division") or "").strip())
-
-    resolved, rows = {}, []
-    for title, count in sorted(titles.items(), key=lambda kv: (-kv[1], kv[0].lower())):
-        dept, div = existing.get(title, ("", ""))
-        if not dept and not div:
-            dept, div = fm.dept_div_from_title(title)      # pre-fill what we do know
-        resolved[title] = (dept, div)
-        rows.append({"work_title": title, "people": count,
-                     "department": dept, "division": div})
-
-    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
-        writer = csv.DictWriter(fh, fieldnames=["work_title", "people",
-                                                "department", "division"])
-        writer.writeheader()
-        writer.writerows(rows)
-    return resolved
-
-
-def validate_title_map(resolved):
-    """Titles whose mapped department/division isn't a real EMR option.
-
-    A typo here would otherwise sail through to the CSV and be caught late, by the
-    validator, as a row error with no hint of where it came from.
-    """
-    problems = []
-    for title, (dept, div) in sorted(resolved.items()):
-        if dept and dept not in VALID_DEPTS:
-            problems.append(f"'{title}': department '{dept}' is not an EMR option")
-        if div and div not in VALID_DIVS:
-            problems.append(f"'{title}': division '{div}' is not an EMR option")
-    return problems
-
-
-# ─────────────────────────────────────────────
 # DATA LOADING
 # ─────────────────────────────────────────────
 
 def load_roster(path=None):
     """Roster people, sorted by name. Returns (people, problem).
 
-    Each person: {name, title, shift, dept, div}. Reuses update_employees.load_roster_xlsx
-    so both tools agree on what the roster file means. Its row-level validation (dates,
-    identifiers) is for the roster-update run and is irrelevant here — a bad date
-    elsewhere in the sheet must not stop you entering encounters.
+    Each person: {name, title, shift, dept, div}. Department and division come STRAIGHT
+    from the roster's own columns — Dane set the right work area for every employee by
+    hand, so there is nothing to infer. (Title is still parsed from new_identifier, but
+    only to drive the work-title filter; it no longer decides anyone's department.)
+
+    Reuses update_employees.load_roster_xlsx so both tools agree on what the roster file
+    means. Its row-level validation (dates, identifiers) is for the roster-update run
+    and is irrelevant here — a bad date elsewhere in the sheet must not stop you
+    entering encounters.
     """
     path = path or ROSTER_XLSX
     if not os.path.exists(path):
@@ -165,23 +106,23 @@ def load_roster(path=None):
     except Exception as exc:
         return [], f"Could not read {os.path.basename(path)}: {exc}"
 
-    seen, people, titles = set(), [], {}
+    seen, people = set(), []
     for row in rows:
         name = (row.get("name") or "").strip()
         if not name or name in seen:
             continue
         seen.add(name)
         title, shift = parse_new_identifier(row.get("new_identifier"))
-        people.append({"name": name, "title": title, "shift": shift})
-        if title:
-            titles[title] = titles.get(title, 0) + 1
+        people.append({
+            "name": name,
+            "title": title,
+            "shift": shift,
+            "dept": (row.get("department") or "").strip(),
+            "div": (row.get("division") or "").strip(),
+        })
 
     if not people:
         return [], f"{os.path.basename(path)} has no usable 'name' column."
-
-    resolved = sync_title_file(titles)
-    for person in people:
-        person["dept"], person["div"] = resolved.get(person["title"], ("", ""))
 
     people.sort(key=lambda p: p["name"].lower())
     return people, None
@@ -292,7 +233,7 @@ def save_prefs(hidden_titles, hidden_shifts, path=None):
 
 class EncounterBuilder(tk.Tk):
 
-    def __init__(self, people, library, roster_problem=None, title_problems=()):
+    def __init__(self, people, library, roster_problem=None):
         super().__init__()
         self.title("Encounter Builder — check names, set the coaching once")
         self._fit_to_screen()
@@ -337,11 +278,6 @@ class EncounterBuilder(tk.Tk):
 
         if roster_problem:
             messagebox.showerror("Roster", roster_problem)
-        if title_problems:
-            messagebox.showwarning(
-                "work_titles.csv",
-                "These rows in work_titles.csv aren't valid EMR options and will be "
-                "ignored:\n\n" + "\n".join(f"  • {p}" for p in title_problems[:12]))
 
     def _fit_to_screen(self):
         """Size the window to the screen, not to a number I made up.
@@ -674,11 +610,12 @@ class EncounterBuilder(tk.Tk):
             widget.configure(state="disabled" if per_employee else active_state)
         if per_employee:
             no_dept = sum(1 for p in self.people if not p["dept"])
-            self.loc_note.config(
-                text=f"From each person's roster record. "
-                     f"{len(self.people) - no_dept} of {len(self.people)} are mapped; "
-                     f"the other {no_dept} get a blank department (safe) until you map "
-                     f"them in work_titles.csv.")
+            note = (f"Department, division and shift come from each person's roster "
+                    f"record.")
+            if no_dept:
+                note += (f" {no_dept} of {len(self.people)} have no department set — "
+                         f"those get a blank one (safe).")
+            self.loc_note.config(text=note)
         else:
             self.loc_note.config(text="Every row in the group gets the same department, "
                                       "division and shift.")
@@ -1026,14 +963,13 @@ class EncounterBuilder(tk.Tk):
 
 def main():
     people, problem = load_roster()
-    resolved = {p["title"]: (p["dept"], p["div"]) for p in people if p["title"]}
-    titles = set(resolved)
-    app = EncounterBuilder(people, load_library(), problem, validate_title_map(resolved))
+    app = EncounterBuilder(people, load_library(), problem)
     # Counts only — never a name — so a captured run stays PHI-free.
-    unmapped = sum(1 for p in people if not p["dept"])
-    print(f"Roster loaded : {len(people)} people, {len(titles)} work titles")
-    print(f"Work area     : {len(people) - unmapped} mapped, {unmapped} unmapped "
-          f"(fill work_titles.csv to map the rest)")
+    no_area = sum(1 for p in people if not p["dept"])
+    titles = len({p["title"] for p in people if p["title"]})
+    print(f"Roster loaded : {len(people)} people, {titles} work titles")
+    print(f"Work area     : {len(people) - no_area} with a department, "
+          f"{no_area} blank (blank is safe)")
     app.mainloop()
 
 

@@ -131,10 +131,16 @@ EDIT_FIELD_SPECS = [
     {"col": "date_of_hire",   "kind": "date",   "selector": "input[placeholder='Date of Hire']",  "label": "Date of Hire"},
 ]
 
+# Columns the roster carries for OTHER tools but this one never edits in the EMR.
+# encounter_builder reads department/division per person; here they ride along so
+# load_roster_xlsx keeps them instead of warning "unrecognized column", and the edit
+# flow (which only writes EDIT_FIELD_SPECS) never touches them.
+PASSTHROUGH_COLS = ["department", "division"]
+
 # Columns that hold dates (validated + reformatted to MM/DD/YYYY on read).
 DATE_COLS = {s["col"] for s in EDIT_FIELD_SPECS if s["kind"] == "date"}
-# All recognized columns = match keys + writable fields.
-KNOWN_COLS = MATCH_COLS + [s["col"] for s in EDIT_FIELD_SPECS]
+# All recognized columns = match keys + passthrough + writable fields.
+KNOWN_COLS = MATCH_COLS + PASSTHROUGH_COLS + [s["col"] for s in EDIT_FIELD_SPECS]
 
 
 # ─────────────────────────────────────────────
@@ -400,9 +406,11 @@ def import_hc_roster(src_path, out_path=None):
     """Convert an HC Reporting .xlsx into the tool's roster.xlsx schema.
 
     Output columns: identifier (match key = Associate ID), name ('Last, First' for the
-    name fallback), new_identifier ('ID-Title-Shift'), date_of_hire (MM/DD/YYYY).
-    Names are NOT written as first/middle/last (that would wipe existing 'First "Nick"'
-    entries — name corrections are a separate pass). Returns (rows_written, warnings).
+    name fallback), new_identifier ('ID-Title-Shift'), date_of_hire (MM/DD/YYYY), and
+    department/division when the source has them (Dane's per-person work-area columns,
+    read by encounter_builder). Names are NOT written as first/middle/last (that would
+    wipe existing 'First "Nick"' entries — name corrections are a separate pass).
+    Returns (rows_written, warnings).
     """
     import openpyxl
     out_path = out_path or ROSTER_XLSX
@@ -419,12 +427,20 @@ def import_hc_roster(src_path, out_path=None):
     if missing:
         return 0, [f"source missing expected column(s): {', '.join(missing)}"]
 
+    # Department/Division are OPTIONAL — an older export won't have them. Copied
+    # through verbatim (Dane maintains the exact EMR spellings himself; this tool does
+    # not second-guess them). Absent columns just mean a blank work area, which is safe.
+    dept_j = header.index("Department") if "Department" in header else -1
+    div_j = header.index("Division") if "Division" in header else -1
+    has_area = dept_j >= 0 and div_j >= 0
+
     warnings = []
     shortened = []  # (name, full, trimmed) when an identifier had to be cut to fit
     out = openpyxl.Workbook()
     osh = out.active
     osh.title = "roster"
-    osh.append(["identifier", "name", "new_identifier", "date_of_hire"])
+    osh.append(["identifier", "name", "new_identifier", "date_of_hire",
+                "department", "division"])
 
     written = 0
     for n, r in enumerate(grid[1:], start=2):
@@ -452,7 +468,9 @@ def import_hc_roster(src_path, out_path=None):
             warnings.append(f"Row {n} ({name_lf}): no job title in Primary Position")
         if not _shift_ordinal(g("shift")):
             warnings.append(f"Row {n} ({name_lf}): unrecognized Shift '{g('shift')}'")
-        osh.append([aid, name_lf, new_id, hire_s])
+        dept = str(r[dept_j]).strip() if has_area and dept_j < len(r) and r[dept_j] else ""
+        div = str(r[div_j]).strip() if has_area and div_j < len(r) and r[div_j] else ""
+        osh.append([aid, name_lf, new_id, hire_s, dept, div])
         written += 1
 
     out.save(out_path)
