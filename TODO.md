@@ -5,14 +5,64 @@ finish them. Newest priorities at the top of each section.
 
 Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
-> **Status 2026-07-06:** Encounter batches 6/30 (40), 7/1 (97), 7/2 (66) all drafted.
-> Roster-update tool + fixes (session guard, date picker) done; **262-person roster redo
-> running now**. Mobile JSON bridge (`mobile_import.py`) built. Project relocated to
-> `Alternate Desktop`. Open: analyze roster redo + unmatched list + long-identifier
-> truncation; nickname re-split fix; real mobile export → live ETS integration.
-> Full narrative in `WORKLOG.md`.
+> **Status 2026-07-20:** Copilot dictation intake **REMOVED** — replaced by
+> **`encounter_builder.py`** (check names off the roster; no AI anywhere in the
+> pipeline). Per-person Department/Division now come from the roster (Dane hand-set all
+> 261). Entry engine hardened (session guard + `--resume`). Full builder **UI overhaul**
+> (flat modern theme, work-area filter, card-based description library, `--demo` mode).
+> Three production bugs fixed (window size / preflight name-read / description-library
+> join — see `WORKLOG.md`). **IN PROGRESS: the add-employee feature** (below). After
+> that: physical & follow-up assessments. Full narrative in `WORKLOG.md`.
+>
+> ⚠️ Sections further down that mention M365 Copilot, dictation, `TRANSCRIPTION_PROMPT.md`
+> or "pivot to mobile" are **historical** — superseded by the local builder above.
 
 ---
+
+## 🔨 IN PROGRESS — Add-employee grouping (attach a group to ONE encounter)
+
+The EMR lets you add extra employees to an encounter before saving; it creates **one
+shared record** covering all of them, and **finalizing that one encounter finalizes it
+for everyone attached** (confirmed by Dane 2026-07-20). Dane's manual finishing per
+draft is just "check the description + hit save", so collapsing a group of N into one
+shared encounter turns a ~91-draft day into a handful — and the automation fills far
+fewer forms, so timeouts stop mattering.
+
+- [x] **Design locked (2026-07-20):** group `encounters.csv` rows that are identical
+      except `employee` → one EMR encounter with all attached. **No CSV change** — the
+      builder's groups already emit identical rows per person. Cross-department groups
+      split naturally into one encounter per area (rows differ), nothing lost.
+- [x] **Control located:** already in our step-2 capture —
+      `<div class="add-more">` in the `employee-info-container` header.
+- [x] **Capture tool built:** `python ati_coaching_encounter.py --capture-addmore "Last, First"`
+      drives to a Coaching Encounter form, clicks `.add-more`, snaps
+      `debug/ADDMORE_00_form|01_opened|02_after_add.html` (scrubbed), pausing for Dane to
+      add one employee by hand. **Never saves.**
+- [ ] **NEXT — Dane runs `--capture-addmore`**, then Claude reads the ADDMORE captures to
+      learn what clicking add-more opens and how an attached employee is stored in the DOM.
+- [ ] **Wire it:** group rows in `run_batch`; fill one encounter (`fill_encounter`), click
+      add-more, add the rest (reuse `locate_employee`), one `Save in progress` per group.
+      Update the audit log to record per-group.
+- [ ] **Open question (non-blocking):** does an added employee take the encounter's
+      Department/Division, or keep their own? Determines whether we can merge across areas.
+- [ ] **Prove on ONE small group as a draft** before any real batch.
+
+## 🔜 NEXT FEATURE — Physical & Follow-Up Assessments (requested 2026-07-20)
+
+A **separate EMR case type** — other tiles in the "Select Assessment Type" modal, not
+Coaching Encounter, so the current tool can't enter them yet. Same pattern as everything
+else here.
+- [ ] Capture the Physical Assessment + Follow-Up forms (like `--capture-fields` /
+      the add-case flow).
+- [ ] Map the fields; decide **"start + first screen only"** vs full fill (see PLAN.md
+      Gap B — the first-screen approach was the earlier plan for assessments).
+- [ ] Wire + prove on one draft.
+
+---
+
+## 📌 Historical (pre-2026-07-16) — superseded by the builder above
+
+> Kept for context. The dictation/Copilot/mobile items below reflect the OLD flow.
 
 ## 📌 Today (2026-07-01)
 
