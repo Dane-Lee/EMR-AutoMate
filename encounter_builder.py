@@ -46,6 +46,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from datetime import date, datetime
 
 import tkinter as tk
@@ -64,6 +65,22 @@ PREFS_JSON = os.path.join(_HERE, "builder_prefs.json")
 # No default. An unset coaching type blocks the group — see the module docstring.
 PICK_ONE = "— pick one —"
 BLANK = ""
+
+# Checked names get a filled box + a soft green row so the pick is obvious at a glance
+# across a 261-name list — the faint "X" prefix was too easy to lose track of.
+CHECK_ON = "☑"
+CHECK_OFF = "☐"
+CHECK_BG = "#d8efd0"
+CHECK_FG = "#166534"
+
+# A flat, current palette — replaces tkinter's default beveled-gray ("Windows 95") look.
+UI_BG = "#f3f4f6"          # window / panel background
+UI_CARD = "#ffffff"        # inputs, cards, the name list
+UI_TEXT = "#1f2933"        # primary text
+UI_MUTED = "#6b7280"       # secondary / hint text
+UI_BORDER = "#d3d7de"      # thin borders and separators
+UI_ACCENT = "#2f6fed"      # focus / primary action
+UI_ACCENT_SOFT = "#e7eefc"  # hover / subtle fill
 
 COACHING_TYPES = sorted(ace.COACHING_TYPE_UUIDS)
 
@@ -209,19 +226,19 @@ def details_from_hint(hint, valid_details):
 
 
 def load_prefs(path=None):
-    """Which titles/shifts are hidden. Set once, sticks between runs."""
+    """Which work areas (divisions) / shifts are hidden. Set once, sticks between runs."""
     try:
         with open(path or PREFS_JSON, encoding="utf-8") as fh:
             data = json.load(fh)
-        return set(data.get("hidden_titles", [])), set(data.get("hidden_shifts", []))
+        return set(data.get("hidden_areas", [])), set(data.get("hidden_shifts", []))
     except Exception:
         return set(), set()
 
 
-def save_prefs(hidden_titles, hidden_shifts, path=None):
+def save_prefs(hidden_areas, hidden_shifts, path=None):
     try:
         with open(path or PREFS_JSON, "w", encoding="utf-8") as fh:
-            json.dump({"hidden_titles": sorted(hidden_titles),
+            json.dump({"hidden_areas": sorted(hidden_areas),
                        "hidden_shifts": sorted(hidden_shifts)}, fh, indent=2)
     except Exception:
         pass          # a pref file that won't save must never block entering encounters
@@ -233,22 +250,29 @@ def save_prefs(hidden_titles, hidden_shifts, path=None):
 
 class EncounterBuilder(tk.Tk):
 
-    def __init__(self, people, library, roster_problem=None):
+    def __init__(self, people, library, roster_problem=None, demo=False):
         super().__init__()
         self.title("Encounter Builder — check names, set the coaching once")
         self._fit_to_screen()
+        self._set_fonts()
 
+        self.demo = demo
         self.people = people
         self.library = library
         self.by_name = {p["name"]: p for p in people}
 
-        self.all_titles = sorted({p["title"] for p in people if p["title"]},
-                                 key=str.lower)
+        # Filter people by their WORK AREA (division) — 8 clean options that Dane
+        # actually thinks in (Assembly, Weld, Admin/Office, …), not the 30-odd job
+        # titles the old filter listed. Every person now has a division from the
+        # roster, so this covers everyone.
+        self.all_areas = sorted({p["div"] for p in people if p["div"]})
+        self.all_depts = sorted({p["dept"] for p in people if p["dept"]}, key=str.lower)
         self.all_shifts = sorted({p["shift"] for p in people if p["shift"]})
-        self.hidden_titles, self.hidden_shifts = load_prefs()
-        # Drop stale prefs for titles/shifts that no longer exist in the roster.
-        self.hidden_titles &= set(self.all_titles)
-        self.hidden_shifts &= set(self.all_shifts)
+        # The demo starts clean and never persists — it must not read or clobber the
+        # real builder_prefs.json (that bled Dane's live filters into the sandbox).
+        self.hidden_areas, self.hidden_shifts = (set(), set()) if demo else load_prefs()
+        self.hidden_areas &= set(self.all_areas)     # drop prefs for areas/shifts
+        self.hidden_shifts &= set(self.all_shifts)   # that no longer exist
 
         self.shown = []               # people currently passing every filter
         self.checked = set()          # persists across filter changes — the whole point
@@ -271,10 +295,17 @@ class EncounterBuilder(tk.Tk):
         self._build_roster_panel()
         self._build_group_panel()
         self._build_batch_bar()
-        self._refresh_titles()
         self._refresh_list()
         self._on_type_change()
         self._on_loc_mode()
+
+        # Come to the front. Launched from a detached process on Windows, a Tk window
+        # often opens BEHIND the console/other windows and never grabs focus — which
+        # looks exactly like "it didn't open". Briefly topmost, then release so it
+        # doesn't stay pinned over everything else.
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(300, lambda: self.winfo_exists() and self.attributes("-topmost", False))
 
         if roster_problem:
             messagebox.showerror("Roster", roster_problem)
@@ -294,13 +325,118 @@ class EncounterBuilder(tk.Tk):
         # Small enough to fit a 1024x768 desktop; below this, scrollbars do the work.
         self.minsize(860, 540)
 
+    def _set_fonts(self):
+        """Give the whole app a flat, current look and readable text — the default
+        theme is beveled 1990s gray and the 9pt controls were too small. Runs before any
+        widget is built (option_add / ttk styles must precede widget creation)."""
+        base = ("Segoe UI", 11)
+        self.configure(bg=UI_BG)
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")     # flat + fully colour-configurable, unlike 'vista'
+        except tk.TclError:
+            pass
+
+        style.configure(".", background=UI_BG, foreground=UI_TEXT, font=base,
+                        bordercolor=UI_BORDER, focuscolor=UI_BG,
+                        fieldbackground=UI_CARD)
+        style.configure("TFrame", background=UI_BG)
+        style.configure("TLabel", background=UI_BG, foreground=UI_TEXT)
+        style.configure("TLabelframe", background=UI_BG, bordercolor=UI_BORDER,
+                        relief="solid", borderwidth=1)
+        style.configure("TLabelframe.Label", background=UI_BG, foreground=UI_MUTED,
+                        font=("Segoe UI", 11, "bold"))
+
+        # Flat buttons with a thin border; hover tints toward the accent.
+        style.configure("TButton", background=UI_CARD, foreground=UI_TEXT,
+                        bordercolor=UI_BORDER, relief="solid", borderwidth=1,
+                        padding=(11, 5))
+        style.map("TButton",
+                  background=[("pressed", UI_ACCENT_SOFT), ("active", UI_ACCENT_SOFT)],
+                  bordercolor=[("active", UI_ACCENT), ("focus", UI_ACCENT)])
+        # A filled accent button for the primary action.
+        style.configure("Accent.TButton", background=UI_ACCENT, foreground="#ffffff",
+                        bordercolor=UI_ACCENT)
+        style.map("Accent.TButton",
+                  background=[("pressed", "#1f5fe0"), ("active", "#3b78ef")],
+                  foreground=[("disabled", "#e5e7eb")])
+
+        for w in ("TCheckbutton", "TRadiobutton"):
+            style.configure(w, background=UI_BG, foreground=UI_TEXT, focuscolor=UI_BG)
+            style.map(w, background=[("active", UI_BG)])
+        style.configure("TEntry", fieldbackground=UI_CARD, bordercolor=UI_BORDER,
+                        relief="solid", borderwidth=1, padding=5)
+        style.map("TEntry", bordercolor=[("focus", UI_ACCENT)])
+        style.configure("TCombobox", fieldbackground=UI_CARD, background=UI_CARD,
+                        bordercolor=UI_BORDER, arrowcolor=UI_TEXT, relief="solid",
+                        borderwidth=1, padding=5, font=base)
+        style.map("TCombobox", fieldbackground=[("readonly", UI_CARD)],
+                  bordercolor=[("focus", UI_ACCENT)])
+        style.configure("TSeparator", background=UI_BORDER)
+        style.configure("Vertical.TScrollbar", background=UI_BG, troughcolor=UI_BG,
+                        bordercolor=UI_BG, arrowcolor=UI_MUTED)
+
+        self.option_add("*TCombobox*Listbox.font", base)
+        self.option_add("*TCombobox*Listbox.background", UI_CARD)
+        self.option_add("*TCombobox*Listbox.selectBackground", UI_ACCENT_SOFT)
+        self.option_add("*TCombobox*Listbox.selectForeground", UI_TEXT)
+
+        self._checkmark_indicator(style)
+
+    def _checkmark_indicator(self, style):
+        """Replace the flat theme's X-shaped checkbox mark with a real checkmark.
+
+        The indicator is a theme-drawn element, so the only clean way to change the
+        glyph is to swap in our own images: an empty white box, and an accent box with
+        a white check. Images are kept on self so Tk doesn't garbage-collect them.
+        """
+        size = 16
+        off = [[UI_BG] * size for _ in range(size)]
+        on = [[UI_BG] * size for _ in range(size)]
+
+        def box(grid, fill, border):
+            for y in range(2, size - 1):
+                for x in range(2, size - 1):
+                    grid[y][x] = fill
+            for i in range(2, size - 1):
+                grid[2][i] = grid[size - 2][i] = border
+                grid[i][2] = grid[i][size - 2] = border
+
+        box(off, UI_CARD, UI_BORDER)
+        box(on, UI_ACCENT, UI_ACCENT)
+        for x, y in [(5, 8), (6, 9), (7, 10), (8, 9), (9, 8), (10, 7), (11, 6)]:
+            for yy in (y, y - 1):        # 2px stroke so the check reads clearly
+                on[yy][x] = "#ffffff"
+
+        def to_img(grid):
+            img = tk.PhotoImage(width=size, height=size, master=self)
+            img.put(" ".join("{" + " ".join(r) + "}" for r in grid))
+            return img
+
+        self._chk_off, self._chk_on = to_img(off), to_img(on)
+        try:
+            style.element_create("Flat.Checkbutton.indicator", "image", self._chk_off,
+                                 ("selected", self._chk_on), padding=(0, 0, 6, 0))
+            style.layout("TCheckbutton", [
+                ("Checkbutton.padding", {"sticky": "nswe", "children": [
+                    ("Flat.Checkbutton.indicator", {"side": "left", "sticky": ""}),
+                    ("Checkbutton.focus", {"side": "left", "sticky": "", "children": [
+                        ("Checkbutton.label", {"sticky": "nswe"})]})]})])
+        except tk.TclError:
+            pass          # element already defined (another instance in this process)
+
     @staticmethod
     def _scrolled_list(parent, **kw):
-        """A Listbox + scrollbar that grows with its container."""
+        """A Listbox + scrollbar that grows with its container. tk.Listbox is a classic
+        widget the ttk theme can't reach, so its flat look is set here directly."""
         wrap = ttk.Frame(parent)
         wrap.grid_rowconfigure(0, weight=1)
         wrap.grid_columnconfigure(0, weight=1)
-        box = tk.Listbox(wrap, activestyle="none", exportselection=False, **kw)
+        box = tk.Listbox(wrap, activestyle="none", exportselection=False,
+                         bg=UI_CARD, fg=UI_TEXT, borderwidth=0, highlightthickness=1,
+                         highlightbackground=UI_BORDER, highlightcolor=UI_BORDER,
+                         selectbackground=UI_ACCENT_SOFT, selectforeground=UI_TEXT,
+                         **kw)
         box.grid(row=0, column=0, sticky="nsew")
         bar = ttk.Scrollbar(wrap, orient="vertical", command=box.yview)
         bar.grid(row=0, column=1, sticky="ns")
@@ -324,22 +460,28 @@ class EncounterBuilder(tk.Tk):
             var = tk.BooleanVar(value=shift not in self.hidden_shifts)
             self.shift_vars[shift] = var
             ttk.Checkbutton(shifts, text=shift, variable=var,
-                            command=self._on_filter_change).pack(side="left", padx=(0, 10))
+                            command=self._on_filter_change).pack(side="left", padx=(0, 12))
 
+        # Work-area filter: real checkboxes for the 8 divisions, not a scroll list of
+        # 30 job titles. Two columns so all of them are on screen at once.
         head = ttk.Frame(frame)
-        head.grid(row=1, column=0, sticky="ew", pady=(6, 2))
-        ttk.Label(head, text="Work titles to show:").pack(side="left")
-        ttk.Button(head, text="None", width=6,
-                   command=lambda: self._all_titles(False)).pack(side="right")
-        ttk.Button(head, text="All", width=5,
-                   command=lambda: self._all_titles(True)).pack(side="right", padx=4)
+        head.grid(row=1, column=0, sticky="ew", pady=(8, 2))
+        ttk.Label(head, text="Areas to show:").pack(side="left")
+        ttk.Button(head, text="none", width=6,
+                   command=lambda: self._all_areas(False)).pack(side="right")
+        ttk.Button(head, text="all", width=5,
+                   command=lambda: self._all_areas(True)).pack(side="right", padx=4)
 
-        # A Listbox, not 32 Checkbuttons: it scrolls natively and toggles with the same
-        # click idiom as the name list below it. height=4 keeps its *requested* size
-        # small so a short window spends its pixels on the names instead.
-        wrap, self.titles_box = self._scrolled_list(frame, font=("Consolas", 10), height=4)
-        wrap.grid(row=2, column=0, sticky="nsew")
-        self.titles_box.bind("<Button-1>", self._on_title_click)
+        areas = ttk.Frame(frame)
+        areas.grid(row=2, column=0, sticky="ew", pady=(0, 2))
+        self.area_vars = {}
+        for i, area in enumerate(self.all_areas):
+            n = sum(1 for p in self.people if p["div"] == area)
+            var = tk.BooleanVar(value=area not in self.hidden_areas)
+            self.area_vars[area] = var
+            ttk.Checkbutton(areas, text=f"{area} ({n})", variable=var,
+                            command=self._on_filter_change).grid(
+                                row=i // 2, column=i % 2, sticky="w", padx=(0, 14))
 
         ttk.Separator(frame, orient="horizontal").grid(row=3, column=0, sticky="ew",
                                                        pady=6)
@@ -352,8 +494,13 @@ class EncounterBuilder(tk.Tk):
         entry = ttk.Entry(find, textvariable=self.filter_var)
         entry.pack(side="left", fill="x", expand=True)
         entry.focus_set()
+        # Review the current pick: collapse the list to just who's checked.
+        self.checked_only = tk.BooleanVar(value=False)
+        ttk.Checkbutton(find, text="checked only", variable=self.checked_only,
+                        command=self._refresh_list).pack(side="left", padx=(8, 0))
 
-        wrap, self.listbox = self._scrolled_list(frame, font=("Consolas", 12), height=8,
+        # Taller, roomier rows in a clean proportional font (was cramped monospace).
+        wrap, self.listbox = self._scrolled_list(frame, font=("Segoe UI", 13), height=8,
                                                  selectmode=tk.EXTENDED)
         wrap.grid(row=5, column=0, sticky="nsew")
         self.listbox.bind("<Button-1>", self._on_click)
@@ -364,81 +511,98 @@ class EncounterBuilder(tk.Tk):
         buttons.grid(row=6, column=0, sticky="ew", pady=(6, 2))
         ttk.Button(buttons, text="Check all shown",
                    command=lambda: self._bulk(True)).pack(side="left")
-        ttk.Button(buttons, text="Uncheck all shown",
+        ttk.Button(buttons, text="Uncheck shown",
                    command=lambda: self._bulk(False)).pack(side="left", padx=4)
         ttk.Button(buttons, text="Clear all",
                    command=self._clear_all).pack(side="left")
 
-        self.count_label = ttk.Label(frame, text="", font=("Segoe UI", 10, "bold"))
-        self.count_label.grid(row=7, column=0, sticky="w", pady=(2, 0))
-        ttk.Label(frame, text="Click a name to check it. Hidden titles/shifts are "
-                             "remembered between runs.",
-                  foreground="#555", wraplength=600).grid(row=8, column=0, sticky="w")
+        # Check everyone in one department in a single move — e.g. the whole of
+        # "Finisher" for a sweep — without disturbing the current filter/view.
+        pick = ttk.Frame(frame)
+        pick.grid(row=7, column=0, sticky="w", pady=(6, 2))
+        ttk.Label(pick, text="Check everyone in:").pack(side="left", padx=(0, 6))
+        self.dept_pick_var = tk.StringVar(value="")
+        combo = ttk.Combobox(pick, textvariable=self.dept_pick_var, state="readonly",
+                             values=self.all_depts, width=26)
+        combo.pack(side="left")
+        combo.bind("<<ComboboxSelected>>", lambda e: self._check_all_in_dept())
 
-    # ── title filter ──────────────────────────
+        self.count_label = ttk.Label(frame, text="", font=("Segoe UI", 13, "bold"),
+                                     foreground=CHECK_FG)
+        self.count_label.grid(row=8, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="Click a name to check it (checked = green). "
+                             "'checked only' reviews your pick. Hidden areas/shifts "
+                             "are remembered between runs.",
+                  foreground="#555", wraplength=600).grid(row=9, column=0, sticky="w")
 
-    def _title_line(self, title):
-        n = sum(1 for p in self.people if p["title"] == title)
-        return f"{'X' if title not in self.hidden_titles else ' '}  {title} ({n})"
+    # ── work-area (division) filter ────────────
 
-    def _refresh_titles(self):
-        self.titles_box.delete(0, tk.END)
-        for title in self.all_titles:
-            self.titles_box.insert(tk.END, self._title_line(title))
-
-    def _on_title_click(self, event):
-        idx = self.titles_box.nearest(event.y)
-        if 0 <= idx < len(self.all_titles):
-            title = self.all_titles[idx]
-            if title in self.hidden_titles:
-                self.hidden_titles.discard(title)
-            else:
-                self.hidden_titles.add(title)
-            self.titles_box.delete(idx)
-            self.titles_box.insert(idx, self._title_line(title))
-            self._on_filter_change()
-        return "break"
-
-    def _all_titles(self, show):
-        self.hidden_titles = set() if show else set(self.all_titles)
-        self._refresh_titles()
+    def _all_areas(self, show):
+        for var in self.area_vars.values():
+            var.set(show)
         self._on_filter_change()
 
     def _on_filter_change(self):
         self.hidden_shifts = {s for s, v in self.shift_vars.items() if not v.get()}
-        save_prefs(self.hidden_titles, self.hidden_shifts)
+        self.hidden_areas = {a for a, v in self.area_vars.items() if not v.get()}
+        if not self.demo:
+            save_prefs(self.hidden_areas, self.hidden_shifts)
+        self._refresh_list()
+
+    def _check_all_in_dept(self):
+        dept = self.dept_pick_var.get()
+        if not dept:
+            return
+        for p in self.people:
+            if p["dept"] == dept:
+                self.checked.add(p["name"])
+        self.dept_pick_var.set("")     # reset so the same dept can be picked again
         self._refresh_list()
 
     # ── name list ─────────────────────────────
 
     def _visible(self, person):
-        if person["title"] and person["title"] in self.hidden_titles:
+        needle = self.filter_var.get().strip().lower()
+        # Reviewing the pick: show EVERY checked person, even one a hidden area/shift
+        # would otherwise drop — the point is to see the whole group before adding it.
+        if self.checked_only.get():
+            return person["name"] in self.checked and needle in person["name"].lower()
+        if person["div"] and person["div"] in self.hidden_areas:
             return False
         if person["shift"] and person["shift"] in self.hidden_shifts:
             return False
-        return self.filter_var.get().strip().lower() in person["name"].lower()
+        return needle in person["name"].lower()
 
     def _display(self, person):
-        return f"{'X' if person['name'] in self.checked else ' '}  {person['name']}"
+        mark = CHECK_ON if person["name"] in self.checked else CHECK_OFF
+        return f" {mark}  {person['name']}"
+
+    def _paint_row(self, idx, checked):
+        if checked:
+            self.listbox.itemconfig(idx, background=CHECK_BG, foreground=CHECK_FG)
+        else:
+            self.listbox.itemconfig(idx, background="", foreground="")
 
     def _refresh_list(self):
         self.shown = [p for p in self.people if self._visible(p)]
         self.listbox.delete(0, tk.END)
-        for person in self.shown:
+        for i, person in enumerate(self.shown):
             self.listbox.insert(tk.END, self._display(person))
+            self._paint_row(i, person["name"] in self.checked)
         self._update_count()
 
     def _update_count(self):
         filtered_out = sum(1 for p in self.people
-                           if p["title"] in self.hidden_titles
+                           if p["div"] in self.hidden_areas
                            or p["shift"] in self.hidden_shifts)
         # A name checked while a filter hid it still counts — say so, so a group can
         # never quietly include someone you can't currently see.
         hidden_checks = len(self.checked - {p["name"] for p in self.shown})
-        extra = f"  ({hidden_checks} checked but not shown)" if hidden_checks else ""
+        extra = f"   ({hidden_checks} checked but hidden)" if hidden_checks else ""
         self.count_label.config(
-            text=f"{len(self.checked)} checked  ·  {len(self.shown)} shown  ·  "
-                 f"{filtered_out} filtered out  ·  {len(self.people)} on roster{extra}")
+            text=f"{CHECK_ON} {len(self.checked)} checked      "
+                 f"{len(self.shown)} shown · {filtered_out} filtered out · "
+                 f"{len(self.people)} on roster{extra}")
 
     def _on_click(self, event):
         idx = self.listbox.nearest(event.y)
@@ -453,9 +617,15 @@ class EncounterBuilder(tk.Tk):
     def _toggle(self, idx):
         person = self.shown[idx]
         name = person["name"]
-        self.checked.discard(name) if name in self.checked else self.checked.add(name)
+        now_checked = name not in self.checked
+        self.checked.add(name) if now_checked else self.checked.discard(name)
+        # "Show checked only" is on: an unchecked row should drop out immediately.
+        if self.checked_only.get() and not now_checked:
+            self._refresh_list()
+            return
         self.listbox.delete(idx)
         self.listbox.insert(idx, self._display(person))
+        self._paint_row(idx, now_checked)
         self._update_count()
 
     def _bulk(self, on):
@@ -476,18 +646,18 @@ class EncounterBuilder(tk.Tk):
         self.group_frame = frame
 
         row = 0
-        ttk.Label(frame, text="Date").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Date").grid(row=row, column=0, sticky="w", pady=2)
         self.date_var = tk.StringVar(value=date.today().strftime("%m/%d/%Y"))
         ttk.Entry(frame, textvariable=self.date_var, width=14).grid(row=row, column=1, sticky="w")
 
         row += 1
-        ttk.Label(frame, text="Encounter type").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Encounter type").grid(row=row, column=0, sticky="w", pady=2)
         self.etype_var = tk.StringVar(value=ace.ENCOUNTER_TYPES[0])
         ttk.Combobox(frame, textvariable=self.etype_var, values=ace.ENCOUNTER_TYPES,
                      state="readonly", width=38).grid(row=row, column=1, sticky="w")
 
         row += 1
-        ttk.Label(frame, text="Coaching type").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Coaching type").grid(row=row, column=0, sticky="w", pady=2)
         self.type_var = tk.StringVar(value=PICK_ONE)
         box = ttk.Combobox(frame, textvariable=self.type_var, values=[PICK_ONE] + COACHING_TYPES,
                            state="readonly", width=38)
@@ -495,19 +665,19 @@ class EncounterBuilder(tk.Tk):
         box.bind("<<ComboboxSelected>>", lambda e: self._on_type_change())
 
         row += 1
-        ttk.Label(frame, text="Details").grid(row=row, column=0, sticky="nw", pady=4)
+        ttk.Label(frame, text="Details").grid(row=row, column=0, sticky="nw", pady=2)
         self.details_frame = ttk.Frame(frame)
         self.details_frame.grid(row=row, column=1, sticky="w")
 
         row += 1
         ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=2,
-                                                       sticky="ew", pady=8)
+                                                       sticky="ew", pady=4)
 
         # ── where they were ──
         row += 1
         ttk.Label(frame, text="Department / shift",
-                  font=("Segoe UI", 9, "bold")).grid(row=row, column=0, columnspan=2,
-                                                     sticky="w")
+                  font=("Segoe UI", 11, "bold")).grid(row=row, column=0, columnspan=2,
+                                                      sticky="w")
         row += 1
         self.loc_mode = tk.StringVar(value="per_employee")
         ttk.Radiobutton(frame, text="Each employee's own, from the roster  "
@@ -566,21 +736,21 @@ class EncounterBuilder(tk.Tk):
         self.loc_note.grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         row += 1
-        ttk.Label(frame, text="Category").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Category").grid(row=row, column=0, sticky="w", pady=2)
         self.cat_var = tk.StringVar(value=fm.CATEGORY_DEFAULT)
         ttk.Combobox(frame, textvariable=self.cat_var,
                      values=[BLANK] + ace.FIELD_OPTIONS.get("Category", []),
                      state="readonly", width=38).grid(row=row, column=1, sticky="w")
 
         row += 1
-        ttk.Label(frame, text="Prompted by").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Prompted by").grid(row=row, column=0, sticky="w", pady=2)
         self.prompted_var = tk.StringVar(value=ace.WHAT_PROMPTED_OPTIONS[0])
         ttk.Combobox(frame, textvariable=self.prompted_var, values=ace.WHAT_PROMPTED_OPTIONS,
                      state="readonly", width=38).grid(row=row, column=1, sticky="w")
 
         row += 1
         ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=2,
-                                                       sticky="ew", pady=8)
+                                                       sticky="ew", pady=4)
 
         row += 1
         head = ttk.Frame(frame)
@@ -599,7 +769,10 @@ class EncounterBuilder(tk.Tk):
         row += 1
         # height=4 keeps the *requested* height small so the whole panel fits a short
         # screen; the row weight lets it grow into whatever space is actually spare.
-        self.desc_text = tk.Text(frame, height=4, wrap="word", font=("Segoe UI", 9))
+        self.desc_text = tk.Text(frame, height=3, wrap="word", font=("Segoe UI", 11),
+                                 bg=UI_CARD, fg=UI_TEXT, borderwidth=1, relief="solid",
+                                 highlightthickness=1, highlightbackground=UI_BORDER,
+                                 highlightcolor=UI_ACCENT, padx=6, pady=6)
         self.desc_text.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=4)
         frame.grid_rowconfigure(row, weight=1)
         frame.grid_columnconfigure(1, weight=1)
@@ -657,67 +830,53 @@ class EncounterBuilder(tk.Tk):
             self.div_var.set(div)
 
     def _open_library(self):
-        """Pick ONE standard description — never a whole worksheet row."""
+        """Browse standard descriptions as readable CARDS — full text visible, grouped
+        by category, filterable. The old one-line-per-description list truncated every
+        entry so you had to click each just to read it; this shows them."""
+        WRAP = 940     # text wrap width inside a card (dialog is a fixed 1040 wide)
         win = tk.Toplevel(self)
         win.title("Standard descriptions")
-        win.geometry("1000x560")
+        win.geometry("1040x680")
         win.transient(self)
         win.grab_set()
-        win.grid_rowconfigure(2, weight=1)
-        win.grid_rowconfigure(4, weight=0)
+        win.grid_rowconfigure(1, weight=1)
         win.grid_columnconfigure(0, weight=1)
 
-        search_var = tk.StringVar()
-        top = ttk.Frame(win, padding=(10, 8))
+        # ── top: category + search ──
+        top = ttk.Frame(win, padding=(12, 10))
         top.grid(row=0, column=0, sticky="ew")
+        ttk.Label(top, text="Category:").pack(side="left", padx=(0, 6))
+        cats = ["All categories"] + sorted({e["tab"] for e in self.library})
+        cat_var = tk.StringVar(value=cats[0])
+        ttk.Combobox(top, textvariable=cat_var, values=cats, state="readonly",
+                     width=24).pack(side="left", padx=(0, 16))
         ttk.Label(top, text="Search:").pack(side="left", padx=(0, 6))
-        entry = ttk.Entry(top, textvariable=search_var)
-        entry.pack(side="left", fill="x", expand=True)
-        entry.focus_set()
+        search_var = tk.StringVar()
+        se = ttk.Entry(top, textvariable=search_var)
+        se.pack(side="left", fill="x", expand=True)
+        se.focus_set()
 
-        ttk.Label(win, text="One line per description. Pick one and only its text goes "
-                            "in — the tab name and your \"Choose …\" note stay out of "
-                            "the record.",
-                  foreground="#555").grid(row=1, column=0, sticky="w", padx=10)
+        # ── middle: a scrollable column of cards ──
+        canvas = tk.Canvas(win, highlightthickness=0, bg=UI_BG)
+        canvas.grid(row=1, column=0, sticky="nsew", padx=(12, 0))
+        vsb = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        vsb.grid(row=1, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=vsb.set)
+        inner = ttk.Frame(canvas)
+        cwin = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(cwin, width=e.width))
+        # Mouse wheel scrolls the list while the (modal) dialog is up; released on close.
+        canvas.bind_all("<MouseWheel>",
+                        lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
-        wrap, box = self._scrolled_list(win, font=("Consolas", 10), height=12)
-        wrap.grid(row=2, column=0, sticky="nsew", padx=10, pady=(4, 6))
-
-        ttk.Label(win, text="Full text of the selected description:",
-                  foreground="#555").grid(row=3, column=0, sticky="w", padx=10)
-        preview = tk.Text(win, height=6, wrap="word", font=("Segoe UI", 9))
-        preview.grid(row=4, column=0, sticky="nsew", padx=10)
-
-        shown = []
-
-        def refresh(*_):
-            needle = search_var.get().strip().lower()
-            shown[:] = [e for e in self.library
-                        if needle in (e["tab"] + e["label"] + e["text"]).lower()]
-            box.delete(0, tk.END)
-            for e in shown:
-                one_line = " ".join(e["text"].split())
-                box.insert(tk.END, f"{e['tab']} · {e['label']}  —  {one_line[:90]}…")
-
-        def on_select(*_):
-            sel = box.curselection()
-            preview.delete("1.0", tk.END)
-            if not sel:
-                return
-            entry_ = shown[sel[0]]
-            preview.insert("1.0", entry_["text"])
-            if entry_["hint"]:
-                preview.insert(tk.END, f"\n\n[your note: {entry_['hint']}]")
-
-        def use():
-            sel = box.curselection()
-            if not sel:
-                return
-            chosen = shown[sel[0]]
-            # ONLY the description text. Not the tab, not the label, not the note.
+        def use(entry):
+            # ONLY the description text reaches the record — never the label or note.
             self.desc_text.delete("1.0", tk.END)
-            self.desc_text.insert("1.0", chosen["text"])
-            ticked = details_from_hint(chosen["hint"], list(self.detail_vars))
+            self.desc_text.insert("1.0", entry["text"])
+            ticked = details_from_hint(entry["hint"], list(self.detail_vars))
             for name in ticked:
                 self.detail_vars[name].set(True)
             win.destroy()
@@ -725,17 +884,53 @@ class EncounterBuilder(tk.Tk):
                 self.batch_detail.config(
                     text="Ticked from your note: " + ", ".join(ticked))
 
-        search_var.trace_add("write", refresh)
-        box.bind("<<ListboxSelect>>", on_select)
-        box.bind("<Double-Button-1>", lambda e: use())
+        def render(*_):
+            for child in inner.winfo_children():
+                child.destroy()
+            cat, needle = cat_var.get(), search_var.get().strip().lower()
+            matches = [e for e in self.library
+                       if (cat == "All categories" or e["tab"] == cat)
+                       and needle in (e["tab"] + e["label"] + e["text"]).lower()]
+            if not matches:
+                ttk.Label(inner, text="No descriptions match.",
+                          foreground="#777").pack(anchor="w", padx=12, pady=14)
+            for e in matches:
+                # tk.Frame (not ttk) so it gets a clean 1px border + white fill,
+                # instead of the theme's beveled panel look.
+                card = tk.Frame(inner, bg=UI_CARD, highlightbackground=UI_BORDER,
+                                highlightthickness=1, bd=0, padx=14, pady=11)
+                card.pack(fill="x", expand=True, padx=(0, 12), pady=6)
+                card.columnconfigure(0, weight=1)
+                head = tk.Frame(card, bg=UI_CARD)
+                head.grid(row=0, column=0, sticky="ew")
+                head.columnconfigure(0, weight=1)
+                tk.Label(head, text=e["label"] or e["tab"], bg=UI_CARD, fg=UI_TEXT,
+                         font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+                tk.Label(head, text=e["tab"], bg=UI_ACCENT_SOFT, fg=UI_ACCENT,
+                         font=("Segoe UI", 9), padx=8, pady=2).grid(
+                    row=0, column=1, sticky="e", padx=8)
+                ttk.Button(head, text="Use", width=7, style="Accent.TButton",
+                           command=lambda x=e: use(x)).grid(row=0, column=2, sticky="e")
+                tk.Label(card, text=e["text"], bg=UI_CARD, fg=UI_TEXT, wraplength=WRAP,
+                         justify="left", font=("Segoe UI", 11)).grid(
+                    row=1, column=0, sticky="w", pady=(6, 0))
+                if e["hint"]:
+                    tk.Label(card, text=f"note: {e['hint']}", bg=UI_CARD, fg=UI_MUTED,
+                             wraplength=WRAP, justify="left", font=("Segoe UI", 10)).grid(
+                        row=2, column=0, sticky="w", pady=(4, 0))
+                for w in (card, head):
+                    w.bind("<Double-Button-1>", lambda ev, x=e: use(x))
 
-        bar = ttk.Frame(win, padding=(10, 8))
-        bar.grid(row=5, column=0, sticky="ew")
-        ttk.Label(bar, text=f"{len(self.library)} descriptions",
+        cat_var.trace_add("write", render)
+        search_var.trace_add("write", render)
+
+        bar = ttk.Frame(win, padding=(12, 10))
+        bar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        ttk.Label(bar, text=f"{len(self.library)} standard descriptions · "
+                            f"only the text you pick reaches the record",
                   foreground="#555").pack(side="left")
-        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side="right")
-        ttk.Button(bar, text="Use this one", command=use).pack(side="right", padx=6)
-        refresh()
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+        render()
 
     # ── bottom: the batch ─────────────────────
 
@@ -763,7 +958,7 @@ class EncounterBuilder(tk.Tk):
                    command=self._review_batch).pack(side="left", padx=6)
         ttk.Button(actions, text="Undo last group",
                    command=self._undo_group).pack(side="left", padx=(0, 6))
-        ttk.Button(actions, text="Write & enter batch",
+        ttk.Button(actions, text="Write & enter batch", style="Accent.TButton",
                    command=self._write_csv).pack(side="left")
 
     def _add_group(self):
@@ -961,13 +1156,87 @@ class EncounterBuilder(tk.Tk):
                 f"    .\\Run-Encounters.ps1")
 
 
-def main():
-    people, problem = load_roster()
-    app = EncounterBuilder(people, load_library(), problem)
+# ─────────────────────────────────────────────
+# DEMO MODE — work on the UI without any PHI
+# ─────────────────────────────────────────────
+# `python encounter_builder.py --demo` loads obviously-fake people and descriptions
+# but REAL EMR departments/divisions/shifts, so the interface behaves exactly as it
+# does live. Nothing here reads roster.xlsx or the workbook, so a demo run — and a
+# screenshot of it — carries no PHI. Any UI change applies to the real builder too;
+# it's the same window, just handed fake data.
+
+def _demo_people():
+    surnames = ["Ashby", "Booker", "Calder", "Danforth", "Ellison", "Fenwick",
+                "Grimes", "Hollis", "Ives", "Jansen", "Keller", "Larkin", "Mercer",
+                "Nash", "Osgood", "Pryor", "Quill", "Ramsey", "Sutton", "Thorne",
+                "Underwood", "Vance", "Whitlock", "Yates", "Zimmer", "Abbott",
+                "Boyd", "Crane", "Doyle", "Ellis", "Frost", "Gray", "Hale", "Iverson"]
+    firsts = ["Alex", "Bailey", "Casey", "Dana", "Emerson", "Finley", "Gale",
+              "Harper", "Indy", "Jordan", "Kai", "Logan", "Morgan", "Noel", "Quinn",
+              "Reese", "Sage", "Tatum", "Val", "Wren"]
+    areas = [("Finisher", "Assembly"), ("Packaging", "Assembly"),
+             ("Stations 40-70", "Assembly"), ("Stations 80-95", "Assembly"),
+             ("Line Lead", "Assembly"), ("Suspension", "Weld"), ("Wrap Weld", "Weld"),
+             ("Frame Bracket", "Weld"), ("Beam", "Weld"), ("Bushing Press", "Machine Operator"),
+             ("THT/Cut Off", "Machine Operator"), ("Spiders Machine", "Machine Operator"),
+             ("Material Handler", "Material Handler"), ("Paint Booth", "Paint Line"),
+             ("Caulk Station", "Paint Line"), ("Admin/Office", "Admin/Office"),
+             ("Supervisor", "Admin/Office"), ("NHO", "Admin/Office"),
+             ("Maintenance", "Maintenance"), ("Quality", "Quality")]
+    titles = ["Assembler", "Welder", "Machine Operator", "Materials Handler",
+              "Line Lead", "Supervisor", "Technician II", "Painter", "Maintenance Tech",
+              "Quality Inspector"]
+    people = []
+    for i, last in enumerate(surnames):
+        dept, div = areas[i % len(areas)]
+        people.append({"name": f"{last}, {firsts[i % len(firsts)]}",
+                       "title": titles[i % len(titles)], "shift": ["1st", "2nd"][i % 2],
+                       "dept": dept, "div": div})
+    return people
+
+
+def _demo_library():
+    return [
+        {"tab": "Safety", "label": 'PPE — gloves', "hint": 'Choose "PPE Use"',
+         "text": "EIS reviewed correct glove selection for the task with the EE and "
+                 "confirmed proper fit before work resumed."},
+        {"tab": "Job Coaching", "label": "High heat index", "hint": 'Choose "Other", "Rest break"',
+         "text": "EIS discussed hydration and pacing with the EE given the high heat "
+                 "index, and reviewed the work-to-rest ratio for the shift."},
+        {"tab": "Health/Wellness", "label": "Hydration", "hint": 'Choose "Hydration"',
+         "text": "EIS coached the EE on daily water intake and signs of dehydration, "
+                 "and set a simple hydration target for the shift."},
+        {"tab": "Ergonomics", "label": "Workstation", "hint": 'Choose "Office ergo adjustment"',
+         "text": "EIS adjusted the EE's workstation height and monitor position and "
+                 "reviewed neutral posture."},
+    ]
+
+
+def main(demo=False):
+    # Under pythonw.exe (GUI launch, no console) sys.stdout/stderr can be None, and a
+    # later print() then crashes the process before the window ever shows. Give them a
+    # sink so the builder runs the same whether launched with python or pythonw.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+
+    demo = demo or "--demo" in sys.argv
+    if demo:
+        people, problem, library = _demo_people(), None, _demo_library()
+    else:
+        people, problem = load_roster()
+        library = load_library()
+
+    app = EncounterBuilder(people, library, problem, demo=demo)
+    if demo:
+        app.title("Encounter Builder — DEMO (fake names, real EMR options)")
+
     # Counts only — never a name — so a captured run stays PHI-free.
     no_area = sum(1 for p in people if not p["dept"])
     titles = len({p["title"] for p in people if p["title"]})
-    print(f"Roster loaded : {len(people)} people, {titles} work titles")
+    print(f"{'DEMO — ' if demo else ''}Roster loaded : {len(people)} people, "
+          f"{titles} work titles")
     print(f"Work area     : {len(people) - no_area} with a department, "
           f"{no_area} blank (blank is safe)")
     app.mainloop()

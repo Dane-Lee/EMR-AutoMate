@@ -47,8 +47,10 @@ encounter_log.csv
 *EMR_notes*
 Active Associates*.xlsx
 EMR Easy Enter Worksheets.xlsx
-# Backups of roster.xlsx (real roster PII), like roster.xlsx itself.
-roster.*backup.xlsx
+# Backups of roster.xlsx (real roster PII), like roster.xlsx itself. Broad on
+# purpose: any roster.<something>.xlsx is a dated/labelled copy of the real roster.
+# (roster_template.xlsx uses an underscore, so it is NOT caught by this.)
+roster.*.xlsx
 # Retired: the builder now reads Department/Division from the roster directly, so it
 # no longer generates this. Kept ignored so any leftover copy can't be committed.
 work_titles.csv
