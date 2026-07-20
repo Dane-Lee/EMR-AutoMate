@@ -1548,6 +1548,83 @@ async def run_capture_fields(employee_name):
             await context.close()
 
 
+async def run_capture_addmore(employee_name):
+    """See what the encounter form's 'add-more' control does — the feature that attaches
+    extra employees to one encounter so a whole group becomes a single draft.
+
+    Drives to a Coaching Encounter form (no save), snaps the form, clicks '.add-more',
+    snaps what opens, then PAUSES for Dane to add one employee by hand so we can capture
+    how an added employee is represented. Nothing is saved. Every snap is scrubbed by
+    phi_redact before it hits disk, so the debug/*.html are safe to read.
+    """
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            USER_DATA_DIR, headless=False, slow_mo=100)
+        page = context.pages[0] if context.pages else await context.new_page()
+        try:
+            await page.goto(BASE_URL)
+            await page.wait_for_load_state("networkidle")
+            popup("Log in / confirm the worksite if needed, then click OK. I'll open a "
+                  "Coaching Encounter and stop at the 'add employees' control — nothing "
+                  "will be saved.", title="EMR AutoMate — capture add-more")
+            await page.wait_for_load_state("networkidle")
+
+            full_name = employee_name.strip()
+            print(f"Locating {ph(full_name)}...")
+            target = await locate_employee(page, full_name)
+            await target.scroll_into_view_if_needed()
+            await target.click()
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(2500)
+
+            # Add Case -> Coaching Encounter (same flow the drafts use).
+            btn = page.locator("button:has-text('+ Add Case')")
+            await btn.wait_for(state="visible", timeout=20000)
+            try:
+                await btn.click(timeout=8000)
+            except Exception:
+                await btn.click(force=True)
+            await page.wait_for_timeout(800)
+            await page.locator(".assessment-type-container",
+                               has_text="Coaching Encounter").click()
+            await page.wait_for_timeout(400)
+            await page.get_by_role("button", name="Add Case", exact=True).click()
+            await page.wait_for_load_state("networkidle")
+            await page.locator(
+                "input.form-field-input[placeholder='Date of Encounter']"
+            ).wait_for(state="visible", timeout=20000)
+            await page.wait_for_timeout(800)
+            await snap(page, "ADDMORE_00_form")           # baseline: the empty form
+
+            # Click the add-more control and see what appears.
+            add_more = page.locator(".add-more")
+            count = await add_more.count()
+            print(f"'.add-more' controls found: {count}")
+            if count:
+                try:
+                    await add_more.first.click(timeout=8000)
+                except Exception:
+                    await add_more.first.click(force=True)
+                await page.wait_for_timeout(1000)
+                await snap(page, "ADDMORE_01_opened")     # what clicking it opens
+                print("Clicked add-more — captured what opened.")
+            else:
+                print("No '.add-more' found on this form — capturing the header anyway.")
+
+            popup("Now, in the browser: add ONE more employee the way you normally would "
+                  "(search / pick them), but do NOT save. Then click OK and I'll capture "
+                  "how the added employee looks.", title="EMR AutoMate — add one employee")
+            await page.wait_for_timeout(500)
+            await snap(page, "ADDMORE_02_after_add")       # how an added employee shows
+
+            popup("Captured. Nothing was saved — closing the browser now.\n\n"
+                  "The scrubbed snapshots are in debug/ADDMORE_*.html.",
+                  title="EMR AutoMate — capture done")
+            print("Done. See debug/ADDMORE_00_form.html, _01_opened.html, _02_after_add.html")
+        finally:
+            await context.close()
+
+
 def review_audit(last_run_only=True):
     """Print the encounter audit log. Names go through ph()/pd(), so on a captured
     stdout (an assistant, a pipe) they show as 'Employee #1' — Dane sees the real names
@@ -1605,5 +1682,12 @@ if __name__ == "__main__":
             print('Usage: python ati_coaching_encounter.py --capture-fields "Last, First"')
         else:
             asyncio.run(run_capture_fields(name))
+    elif "--capture-addmore" in sys.argv:
+        i = sys.argv.index("--capture-addmore")
+        name = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
+        if not name:
+            print('Usage: python ati_coaching_encounter.py --capture-addmore "Last, First"')
+        else:
+            asyncio.run(run_capture_addmore(name))
     else:
         asyncio.run(run())

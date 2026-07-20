@@ -6,6 +6,98 @@ what decisions we made, and where we left off. See `TODO.md` for the forward lis
 
 ---
 
+## Session 14 — 2026-07-16 → 07-20 (Copilot intake removed → local Encounter Builder; UI overhaul; add-employee feature started)
+
+### Copilot dictation intake RETIRED → `encounter_builder.py`
+The M365 Copilot dictation→CSV flow was miserable — dictation mangled names and the
+LLM kept guessing controlled values (it once stamped one coaching type across 80
+records). Removed it whole: deleted `copilot_spec.md`, `make_copilot_prompt.py`,
+`library_export.py`, `Paste-Encounters.ps1`, `DICTATION_PROMPT.md`,
+`TRANSCRIPTION_PROMPT.md`, `M365_WORKFLOW.md`, the dormant `.github` prompt.
+`WORKFLOW.md` replaces `M365_WORKFLOW.md`.
+- **`encounter_builder.py`** (tkinter): check names off the roster (never typed → never
+  mis-transcribed), set the coaching once per group, write `encounters.csv`. Every
+  controlled value is imported from `ati_coaching_encounter` so the picker can't drift
+  from the validator. `coaching_type` has no default — a dropdown can't guess it.
+
+### Three production bugs — all the same mistake: couldn't see it, guessed, shipped confident
+- **Window 850px tall on an 800px screen** → the action buttons were off-screen. Now
+  sizes from `winfo_screenheight()`; the batch bar is pinned to a zero-weight row.
+- **Preflight read each roster row's first line of text as the employee name** → all 77
+  names came back "not found" and it blamed Dane's data. The name is
+  `<span class="name">` (see `update_employees._ROW_RE`). Also now waits for the React
+  roster to render, and treats an empty roster as a load failure, not bad names.
+- **The description library joined every worksheet cell with `" | "`** → wrote
+  `Choose "Other" | Job-Specific Coaching | EIS asked…` into 77 records, and dropped
+  row 1 of every tab as a "header". Now classifies cells by length (labels ≤54,
+  descriptions ≥62 — clean gap). A `Choose "…"` note auto-ticks the detail boxes.
+- `CLAUDE.md` now names this pattern and records the three facts, so the next session
+  measures instead of guessing.
+
+### Per-person Department/Division from the roster
+Dane hand-set Department + Division for all 261 employees in the HC export.
+`import_hc_roster` now copies both into `roster.xlsx` verbatim (no correction); the
+builder reads each person's own area. Retired `work_titles.csv` (title-guessing).
+The heat-index case (one coaching, people across departments) is now correct at the
+source rather than inferred.
+
+### Entry-engine robustness
+- **Session guard** (`open_dashboard`): an expired session mid-run was burning a 30s
+  click-timeout per row until the circuit breaker stopped the batch (77 → 35 saved).
+  Now detects the login screen, pauses for re-login, resumes.
+- **`--resume`**: rewrites `encounters.csv` to only the rows the audit log did NOT
+  confirm saved, keyed by content so it's idempotent. Used after a partial run.
+- `mobile_import.py` was printing employee names raw (no `phi_redact`) — fixed.
+
+### UI overhaul (Dane: "looks like Windows 95")
+- Flat `clam`-based theme + palette (white cards, thin borders, accent blue, 11pt
+  text). Custom **checkmark** checkbox indicator (was an X).
+- Picking people: taller proportional-font rows, green highlight + ☑ on checked names,
+  a bold checked-count, a "checked only" review toggle, and a "Check everyone in
+  <department>" one-shot.
+- Filter: replaced the 30-job-title scroll list with **8 work-AREA (division)
+  checkboxes** (Admin/Office back on screen). Prefs store `hidden_areas`.
+- Library: rebuilt into scrollable **cards** (full text visible, category tag, Use
+  button, category filter + search).
+- **Demo mode** (`--demo`): fake names + real EMR structure, so UI work is PHI-free —
+  and screenshottable (window-handle capture). This is how the UI was finally
+  *verified* instead of guessed.
+- Fixed a real launch bug: `main()` used `sys.argv` but never imported `sys` (a
+  `NameError` that crashed any launch) + a `pythonw` stdout guard + raise-to-front.
+
+### Add-employee feature — STARTED (design locked, capture tool built, NOT yet wired)
+The EMR lets you add extra employees to an encounter before saving; **confirmed by Dane
+(2026-07-20): it creates ONE shared record covering all of them, and finalizing that
+one encounter finalizes it for everyone attached.** His manual finishing per draft is
+just "check the description + hit save". So collapsing a group of N into one shared
+encounter turns a ~91-draft day into a handful.
+- **The control is already in our captures**: the step-2 form header has
+  `<div class="add-more"><span>…</span></div>` (label `redacted:8`, likely "Add More").
+- **Design**: group `encounters.csv` rows that are identical except `employee` → one EMR
+  encounter with all attached. No CSV change (the builder's groups already emit
+  identical rows per person). Cross-department groups split naturally into one encounter
+  per area (their rows differ), nothing lost.
+- **Built `--capture-addmore "Last, First"`**: drives to a Coaching Encounter form,
+  clicks `.add-more`, snaps `debug/ADDMORE_00_form|01_opened|02_after_add.html`
+  (scrubbed), pausing for Dane to add one employee by hand. Never saves.
+- **Left off here** → next is: Dane runs `--capture-addmore`; Claude reads the ADDMORE
+  captures; wire the grouping + add-more automation into `run_batch`/`fill_encounter`;
+  prove on ONE small group as a draft.
+- Open (non-blocking): does an added employee take the encounter's Department/Division or
+  their own? Tells us whether we can merge across areas too.
+
+### Next feature after that
+**Physical & Follow-Up Assessments** (requested 2026-07-20): a separate EMR case type
+(other tiles in the "Select Assessment Type" modal). Same pattern — capture the form,
+map its fields, wire it.
+
+### Committed this session (branch `replace-copilot-intake-with-encounter-builder`)
+`31b3d8d` Copilot removal + builder · `62bb892`/earlier bug fixes · `fa894b1` per-person
+dept/div · `04a09c0` UI overhaul. The `--capture-addmore` tool + these doc updates are
+the latest commit.
+
+---
+
 ## Sessions 6–13 — 2026-06-26 → 07-06 (Roster-update feature, field-mapping engine, mobile bridge, 3 encounter batches)
 
 Big stretch; grouped by theme rather than day.
