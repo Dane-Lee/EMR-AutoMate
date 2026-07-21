@@ -65,31 +65,25 @@ source rather than inferred.
 - Fixed a real launch bug: `main()` used `sys.argv` but never imported `sys` (a
   `NameError` that crashed any launch) + a `pythonw` stdout guard + raise-to-front.
 
-### Add-employee feature — STARTED (design locked, capture tool built, NOT yet wired)
-The EMR lets you add extra employees to an encounter before saving; **confirmed by Dane
-(2026-07-20): it creates ONE shared record covering all of them, and finalizing that
-one encounter finalizes it for everyone attached.** His manual finishing per draft is
-just "check the description + hit save". So collapsing a group of N into one shared
-encounter turns a ~91-draft day into a handful.
-- **The control is already in our captures**: the step-2 form header has
-  `<div class="add-more"><span>…</span></div>` (label `redacted:8`, likely "Add More").
-- **Design**: group `encounters.csv` rows that are identical except `employee` → one EMR
-  encounter with all attached. No CSV change (the builder's groups already emit
-  identical rows per person). Cross-department groups split naturally into one encounter
-  per area (their rows differ), nothing lost.
-- **Built `--capture-addmore "Last, First"`**: drives to a Coaching Encounter form,
-  clicks `.add-more`, snaps `debug/ADDMORE_00_form|01_opened|02_after_add.html`
-  (scrubbed), pausing for Dane to add one employee by hand. Never saves.
-- **Left off here** → next is: Dane runs `--capture-addmore`; Claude reads the ADDMORE
-  captures; wire the grouping + add-more automation into `run_batch`/`fill_encounter`;
-  prove on ONE small group as a draft.
-- Open (non-blocking): does an added employee take the encounter's Department/Division or
-  their own? Tells us whether we can merge across areas too.
+### Add-employee feature — INVESTIGATED then SHELVED (2026-07-21)
+The EMR lets you attach extra employees to an encounter before saving. First read
+(2026-07-20): adding N → one shared record, finalizing it finalizes for all → collapse a
+group into one draft. Built a `--capture-addmore` mode to see the `.add-more` control.
+**Then Dane corrected it (2026-07-21): the collapse into one record only happens on
+FINAL save. On "Save in progress" — which is exactly what AutoMate does — it creates
+individual drafts per attached employee anyway.** So there's no saving in the draft
+workflow, and finalizing from AutoMate would break the "nothing finalized without Dane"
+model. **Dropped**: removed the `--capture-addmore` code (still in git history), marked
+it SHELVED in TODO.md so it isn't re-investigated.
 
-### Next feature after that
-**Physical & Follow-Up Assessments** (requested 2026-07-20): a separate EMR case type
-(other tiles in the "Select Assessment Type" modal). Same pattern — capture the form,
-map its fields, wire it.
+### Now active — Physical Assessments & PA Follow-Ups (requested 2026-07-20)
+A separate EMR case type. The "Select Assessment Type" modal has ~8
+`assessment-type-container` tiles (Coaching Encounter is one; the assessments are the
+rest). Plan: the earlier **"start + first screen only"** approach (PLAN.md Gap B) —
+pick the tile, fill the shared first screen, Save in progress, Dane finishes the
+assessment-specific screens. Same build pattern: **capture the form → map fields →
+wire → prove on one draft.** Open scoping questions for Dane: exact tile labels, the
+data source (`pa_follow_ups.csv`? the builder? dictation?), and how much to fill.
 
 ### Committed this session (branch `replace-copilot-intake-with-encounter-builder`)
 `31b3d8d` Copilot removal + builder · `62bb892`/earlier bug fixes · `fa894b1` per-person
