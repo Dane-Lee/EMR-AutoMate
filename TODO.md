@@ -19,44 +19,39 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ---
 
-## 🔨 IN PROGRESS — Add-employee grouping (attach a group to ONE encounter)
+## 🔨 IN PROGRESS — Physical Assessments & PA Follow-Ups (requested 2026-07-20)
 
-The EMR lets you add extra employees to an encounter before saving; it creates **one
-shared record** covering all of them, and **finalizing that one encounter finalizes it
-for everyone attached** (confirmed by Dane 2026-07-20). Dane's manual finishing per
-draft is just "check the description + hit save", so collapsing a group of N into one
-shared encounter turns a ~91-draft day into a handful — and the automation fills far
-fewer forms, so timeouts stop mattering.
+A **separate EMR case type** — the current tool only enters Coaching Encounters. The
+"Select Assessment Type" modal has ~8 `assessment-type-container` tiles; Coaching
+Encounter is one, the assessments (Physical Assessment, PA Follow-Up, HMA, Office, Task,
+Work Readiness) are the others. Same pattern as everything else: **capture the form →
+map the fields → wire it → prove on one draft.**
 
-- [x] **Design locked (2026-07-20):** group `encounters.csv` rows that are identical
-      except `employee` → one EMR encounter with all attached. **No CSV change** — the
-      builder's groups already emit identical rows per person. Cross-department groups
-      split naturally into one encounter per area (rows differ), nothing lost.
-- [x] **Control located:** already in our step-2 capture —
-      `<div class="add-more">` in the `employee-info-container` header.
-- [x] **Capture tool built:** `python ati_coaching_encounter.py --capture-addmore "Last, First"`
-      drives to a Coaching Encounter form, clicks `.add-more`, snaps
-      `debug/ADDMORE_00_form|01_opened|02_after_add.html` (scrubbed), pausing for Dane to
-      add one employee by hand. **Never saves.**
-- [ ] **NEXT — Dane runs `--capture-addmore`**, then Claude reads the ADDMORE captures to
-      learn what clicking add-more opens and how an attached employee is stored in the DOM.
-- [ ] **Wire it:** group rows in `run_batch`; fill one encounter (`fill_encounter`), click
-      add-more, add the rest (reuse `locate_employee`), one `Save in progress` per group.
-      Update the audit log to record per-group.
-- [ ] **Open question (non-blocking):** does an added employee take the encounter's
-      Department/Division, or keep their own? Determines whether we can merge across areas.
-- [ ] **Prove on ONE small group as a draft** before any real batch.
+Starting plan is PLAN.md **Gap B "start + first screen only"** (decided 2026-06-23):
+AutoMate picks the assessment tile, fills the shared first ("Encounter Details") screen,
+and Saves in progress; Dane finishes the assessment-specific screens by hand. Revisit vs
+fuller automation once we see the forms.
 
-## 🔜 NEXT FEATURE — Physical & Follow-Up Assessments (requested 2026-07-20)
+- [ ] **Scope (asking Dane):** exact tile labels for Physical Assessment + PA Follow-Up;
+      the **source** of the data (a CSV like `pa_follow_ups.csv`? the builder? dictation?);
+      how much AutoMate should fill (first screen only vs more); how PA vs Follow-Up differ.
+- [ ] **Capture the forms:** build a capture mode (reuse the add-case navigation) that
+      clicks the assessment tile and snaps the form(s), scrubbed, like `--capture-fields`.
+- [ ] **Map fields** against the captured forms.
+- [ ] **Wire + prove on ONE draft** before any batch.
+- [ ] Parked/related: HMA-score double-entry (PLAN.md B-future) is a bigger, separate build.
 
-A **separate EMR case type** — other tiles in the "Select Assessment Type" modal, not
-Coaching Encounter, so the current tool can't enter them yet. Same pattern as everything
-else here.
-- [ ] Capture the Physical Assessment + Follow-Up forms (like `--capture-fields` /
-      the add-case flow).
-- [ ] Map the fields; decide **"start + first screen only"** vs full fill (see PLAN.md
-      Gap B — the first-screen approach was the earlier plan for assessments).
-- [ ] Wire + prove on one draft.
+## 🚫 SHELVED — Add-employee grouping (attach a group to one encounter)
+
+Investigated 2026-07-20, dropped 2026-07-21. The idea: attach a whole group to one
+encounter so it's a single record. **Why it doesn't work for us:** the EMR only collapses
+the attached employees into ONE shared record when you **finalize (Save)**. When you
+**Save in progress** — which is exactly what AutoMate does, by design, so nothing is
+finalized without Dane — it creates **individual drafts per attached employee anyway**.
+So in the draft workflow there's no time saved. Don't re-investigate unless the tool ever
+moves off draft-based entry (which would break the core safety model). The `.add-more`
+control (`employee-info-container` header) and the removed `--capture-addmore` tool are in
+git history (commit `29e4be1`) if ever needed.
 
 ---
 
