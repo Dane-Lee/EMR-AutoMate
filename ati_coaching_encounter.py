@@ -353,7 +353,12 @@ async def snap(page: Page, label: str):
     try:
         folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
         os.makedirs(folder, exist_ok=True)
-        ts = datetime.now().strftime("%H%M%S")
+        # Datestamped, not just HHMMSS. Without the date, captures from different days
+        # interleave in one flat listing and sort into a single false chronology — on
+        # 2026-08-10 a 09:56 capture sat directly beside a 16:11 one from eleven days
+        # earlier, and telling them apart meant falling back to mtime. %Y%m%d sorts
+        # correctly as text, so a plain directory listing is the run history.
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = os.path.join(folder, f"{ts}_{label}")
 
         # Scrub BEFORE writing: the raw HTML only ever exists in memory.
