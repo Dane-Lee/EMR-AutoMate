@@ -101,8 +101,9 @@ the two flows, Teams publish, whatever DLP policy IT requires.
 on the way in, dedup against `encounter_log.csv` so a re-import can't draft anyone twice.
 
 `mobile_import.py` is the natural home for the import side — it was built as exactly this
-bridge. **It prints names raw** and must be routed through `phi_redact` before it runs
-again; that's a prerequisite, not a nice-to-have.
+bridge. Its raw-name printing was fixed in `31b3d8d`, so that prerequisite is met; what
+it still needs is dedup and a non-destructive write (it overwrote `encounters.csv`
+outright until 2026-08-10).
 
 The split means I can build my half without ever seeing a record. The CSV is gitignored,
 and I read it only through aggregate probes and redacted output, same as everything else.
