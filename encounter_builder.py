@@ -1501,12 +1501,97 @@ class EncounterBuilder(tk.Tk):
         self.add_btn = ttk.Button(actions, text="Add group to batch",
                                   command=self._add_group)
         self.add_btn.pack(side="left")
+        ttk.Button(actions, text="📥 From Tracker Lite",
+                   command=self._import_tracker).pack(side="left", padx=6)
         ttk.Button(actions, text="Review batch…",
                    command=self._review_batch).pack(side="left", padx=6)
         ttk.Button(actions, text="Undo last group",
                    command=self._undo_group).pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Write & enter batch", style="Accent.TButton",
                    command=self._write_csv).pack(side="left")
+
+    def _import_tracker(self):
+        """Pull floor captures from EMR Tracker Lite into the batch.
+
+        Each capture becomes its own group of one — the same shape "Add & Next" makes —
+        so they show up in Review, can be deleted individually, and are finished here
+        before anything is written. A capture never bypasses the builder.
+
+        Department, division and shift are taken from the ROSTER, not from the phone.
+        Category and encounter type come from the form's current values, so whatever
+        Dane has selected applies. The capture supplies only who / when / type /
+        details / description / prompted-by.
+        """
+        try:
+            import tracker_import as ti
+            import ati_coaching_encounter as ace
+        except Exception as exc:
+            messagebox.showerror("Import unavailable", f"Couldn't load the importer:\n{exc}")
+            return
+
+        rows, problems, errors, found = ti.import_for_builder(
+            self.people,
+            valid_coaching_types=set(ace.CHECKBOX_UUID_MAP),
+            encounter_type=self.etype_var.get(),
+            category=self.cat_var.get(),
+        )
+
+        if not found:
+            messagebox.showinfo(
+                "No captures found",
+                "No tracker_capture.json turned up.\n\n"
+                "In Tracker Lite, press “→ Send to Builder”. If you used “Set folder”, "
+                "it writes straight into your OneDrive/Drive folder; otherwise it lands "
+                "in Downloads and you move it across.\n\n"
+                "Looked in:\n  " + "\n  ".join(
+                    d for d in ti.default_search_dirs() if d))
+            return
+
+        if not rows and not problems:
+            messagebox.showinfo("Nothing to import",
+                                f"{os.path.basename(found)} has no captures in it.")
+            return
+
+        detail = [f"{len(rows)} capture(s) ready to add."]
+        if problems:
+            detail.append(f"\n{len(problems)} could NOT be matched and will be left out:")
+            for cap, why in problems[:8]:
+                detail.append(f"   • {cap['employee']} — {why}")
+            if len(problems) > 8:
+                detail.append(f"   … and {len(problems) - 8} more")
+            detail.append("\nFix those in Tracker Lite and send again.")
+        if errors:
+            detail.append("\n" + "\n".join(errors))
+        if rows:
+            detail.append(f"\nWork area and shift come from the roster, not the phone.")
+            detail.append("Add them to the batch?")
+
+        if not rows:
+            messagebox.showwarning("Nothing could be matched", "\n".join(detail))
+            return
+        if not messagebox.askyesno("Import from Tracker Lite", "\n".join(detail)):
+            return
+
+        for row in rows:
+            self.groups.append({
+                "rows": [row],
+                "label": (f"  1 person  ·  {row['coaching_type']}"
+                          f"{'  ·  ' + row['details'] if row['details'] else ''}"
+                          f"  ·  {row['date'] or 'today'}  ·  {row['employee']}"
+                          f"   [Tracker Lite]"),
+            })
+        self._update_batch()
+
+        # Archive so the same encounters can't be pulled in twice. Renamed, not deleted.
+        archived = ti.archive_capture(found)
+        messagebox.showinfo(
+            "Imported",
+            f"{len(rows)} capture(s) added to the batch.\n\n"
+            + (f"The capture file was renamed to\n{os.path.basename(archived)}\n"
+               f"so the same encounters can't be imported twice."
+               if archived else
+               "NOTE: the capture file could not be renamed — delete or move it "
+               "yourself, or the next import will add these again."))
 
     def _encounter_fields(self):
         """Validate and read the encounter fields both add paths share.
