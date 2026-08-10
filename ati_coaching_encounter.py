@@ -36,6 +36,17 @@ import name_match
 import phi_redact
 from phi_redact import ph, pd  # ph(name) / pd(free text) — see PHI NOTE below
 
+# This file prints ⚠, ✓, — and friends in 119 places. On Windows a REDIRECTED stdout
+# defaults to cp1252, which cannot encode any of them, so `Run-Encounters.ps1 > log.txt`
+# died on the first warning — and a redirect is exactly when phi_redact turns redaction
+# ON, so the crash was reserved for the runs meant to be captured and reviewed. Force
+# UTF-8 on both streams; a real console is unaffected.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass  # already-wrapped or non-reconfigurable stream: leave it alone
+
 # ─────────────────────────────────────────────
 # CONFIG — fill these in before running
 # ─────────────────────────────────────────────
@@ -1250,13 +1261,43 @@ def batch_warnings(encounters):
     return warns
 
 
-def _last_run_saved_keys():
-    """{(employee, date, coaching_type)} that the MOST RECENT run confirmed saved.
+def _encounter_key(employee, enc_date, coaching_type):
+    """The identity of an encounter for dedup purposes.
 
-    Keyed by content, not by row number: a resumed encounters.csv is renumbered, so
-    row indices from an older run would point at the wrong people. Content keys also
-    make --resume idempotent — run it twice and the second pass finds those rows
-    already gone, instead of eating a different 35.
+    Content, not row number: a resumed encounters.csv is renumbered, so row indices
+    from an older run point at the wrong people. Stripped on every side because
+    log_encounter() strips the name before writing it and the CSV may not have.
+    """
+    return ((employee or "").strip(),
+            (enc_date or "").strip(),
+            (coaching_type or "").strip())
+
+
+def _saved_keys_by_run():
+    """{key: [run_started, ...]} for every CONFIRMED save in the whole audit log.
+
+    Spans ALL runs, not just the last one. A batch is not always finished by the run
+    that started it — 2026-07-31 entered 34 of 36 rows, and on 2026-08-10 the same
+    file was run again from row 1 and re-drafted the first two people, because the
+    only thing looking at the log was --resume and it only ever read the last run.
+    """
+    if not os.path.exists(ENCOUNTER_LOG_CSV):
+        return {}
+    by_key = {}
+    with open(ENCOUNTER_LOG_CSV, newline="", encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            if not r.get("run_started") or r.get("status") != "saved":
+                continue
+            key = _encounter_key(r["employee"], r["date"], r["coaching_type"])
+            by_key.setdefault(key, []).append(r["run_started"])
+    return by_key
+
+
+def _last_run_saved_keys():
+    """{keys} the MOST RECENT run confirmed saved, plus that run's timestamp.
+
+    Kept for the resume report, which distinguishes "this run stopped early" from
+    "this batch was already entered days ago" — they need different advice.
     """
     if not os.path.exists(ENCOUNTER_LOG_CSV):
         return set(), None
@@ -1265,17 +1306,46 @@ def _last_run_saved_keys():
     if not rows:
         return set(), None
     last = max(r["run_started"] for r in rows)
-    keys = {(r["employee"], r["date"], r["coaching_type"])
+    keys = {_encounter_key(r["employee"], r["date"], r["coaching_type"])
             for r in rows if r["run_started"] == last and r["status"] == "saved"}
     return keys, last
 
 
-def resume_batch():
-    """Rewrite encounters.csv to only the rows the last run did NOT save.
+def already_saved_rows(encounters):
+    """Which rows of this batch a previous run already confirmed saved.
 
-    A run can stop early — a timed-out session, the circuit breaker — leaving the
-    batch half entered. Re-running the same file would draft the saved ones a second
-    time, so this drops them and leaves the remainder.
+    Returns (indices, runs): 1-based positions in `encounters`, and the sorted set of
+    run timestamps that entered them. Empty means nothing in this batch has been
+    drafted before.
+
+    This is the check that was missing. Everything else in the pre-flight asks whether
+    a row CAN be entered; nothing asked whether it already HAS been.
+    """
+    by_key = _saved_keys_by_run()
+    if not by_key:
+        return [], []
+    indices, runs = [], set()
+    for i, enc in enumerate(encounters, 1):
+        key = _encounter_key(enc.get("employee_search"),
+                             enc.get("date_of_encounter"),
+                             enc.get("coaching_type"))
+        if key in by_key:
+            indices.append(i)
+            runs.update(by_key[key])
+    return indices, sorted(runs)
+
+
+def resume_batch():
+    """Rewrite encounters.csv to only the rows NO run has saved yet.
+
+    A run can stop early — a timed-out session, the circuit breaker, a browser closed
+    mid-batch — leaving the batch half entered. Re-running the same file would draft
+    the saved ones a second time, so this drops them and leaves the remainder.
+
+    Drops rows saved by ANY run, not just the most recent. A batch is not always
+    finished by the run that started it: on 2026-08-10 a file already 34/36 entered on
+    2026-07-31 was re-run from row 1, and a resume scoped to the last run would have
+    dropped only that run's 2 saves and handed back 34 rows to draft a second time.
 
     Only rows the audit log records as CONFIRMED saved are dropped. A row that errored
     is kept: the debug captures show those die before the form is reached, so they
@@ -1284,16 +1354,20 @@ def resume_batch():
     if not os.path.exists(ENCOUNTERS_CSV):
         sys.exit("No encounters.csv to resume.")
 
-    saved_keys, run_started = _last_run_saved_keys()
-    if not saved_keys:
-        print("The audit log has no confirmed-saved rows for the last run.")
-        print("Nothing to drop — encounters.csv is left exactly as it is.")
-        return
-
     encounters, errors = load_encounters_csv(ENCOUNTERS_CSV)
     if errors:
         sys.exit(f"encounters.csv has {len(errors)} validation problem(s) — "
                  f"fix those first (.\\Run-Encounters.ps1 -Check).")
+    if not encounters:
+        print("encounters.csv has no rows — nothing to resume.")
+        return
+
+    saved_by_run = _saved_keys_by_run()
+    if not saved_by_run:
+        print("The audit log has no confirmed-saved rows at all.")
+        print("Nothing to drop — encounters.csv is left exactly as it is.")
+        return
+    last_run_keys, run_started = _last_run_saved_keys()
 
     # Raw CSV rows, skipping blanks exactly as load_encounters_csv does, so index i
     # of `raw` is the same encounter as index i of `encounters`.
@@ -1304,27 +1378,30 @@ def resume_batch():
         sys.exit("Couldn't line up encounters.csv rows with the validator — "
                  "not touching the file.")
 
-    keep, dropped = [], 0
+    keep, dropped, from_earlier = [], 0, 0
     for row, enc in zip(raw, encounters):
-        key = (enc.get("employee_search") or "",
-               enc.get("date_of_encounter") or "",
-               enc.get("coaching_type") or "")
-        if key in saved_keys:
+        key = _encounter_key(enc.get("employee_search"),
+                             enc.get("date_of_encounter"),
+                             enc.get("coaching_type"))
+        if key in saved_by_run:
             dropped += 1
+            if key not in last_run_keys:
+                from_earlier += 1
         else:
             keep.append(row)
 
     print(f"Last run: {run_started}")
-    print(f"  confirmed saved in that run : {len(saved_keys)}")
     print(f"  rows in encounters.csv      : {len(raw)}")
     print(f"  dropping (already saved)    : {dropped}")
+    if from_earlier:
+        print(f"    ...of those, saved by an EARLIER run, not the last one: {from_earlier}")
     print(f"  keeping (still to enter)    : {len(keep)}")
 
     if not keep:
-        print("\nEverything in this batch is already saved. Nothing left to enter.")
+        print("\nEvery row in this batch is already saved. Nothing left to enter.")
         return
     if not dropped:
-        print("\nNone of these rows match the last run's saved list — file unchanged.")
+        print("\nNone of these rows appear in the saved list — file unchanged.")
         return
 
     with open(ENCOUNTERS_BAK_CSV, "w", newline="", encoding="utf-8-sig") as fh:
@@ -1367,6 +1444,51 @@ def prepare_batch():
             print(f"   - {e}")
         print("\nNothing was entered. Correct the CSV and run again.")
         raise SystemExit(1)
+
+    # ── ALREADY-ENTERED GATE ───────────────────
+    # Every other pre-flight check asks whether a row CAN be entered. This one asks
+    # whether it already HAS been, which is the question nothing was asking on
+    # 2026-08-10: a batch from 2026-07-31, already 34/36 entered, was still sitting in
+    # encounters.csv and a plain run re-drafted the first two people before the browser
+    # was closed. The audit log knew. Nothing consulted it.
+    #
+    # A duplicate draft is a real record about a real person, so this gate defaults to
+    # NOT entering — the popup has to be actively accepted.
+    dupe_rows, dupe_runs = already_saved_rows(encounters)
+    if dupe_rows:
+        n, total = len(dupe_rows), len(encounters)
+        whole = n == total
+        print(f"\n⚠ {n} of {total} row(s) in this batch were ALREADY SAVED by an "
+              f"earlier run.")
+        print(f"  Previously entered on: {', '.join(dupe_runs)}")
+        print(f"  Row number(s): {', '.join(str(i) for i in dupe_rows)}")
+        print("  Entering them again would create a SECOND draft for those people.")
+
+        if whole:
+            msg = (f"Every one of these {total} encounter(s) has already been "
+                   f"entered.\n\nPreviously entered on: {', '.join(dupe_runs)}\n\n"
+                   f"This is almost certainly a stale encounters.csv left over from a "
+                   f"finished batch. Entering it again would draft everyone a second "
+                   f"time.\n\nNothing has been entered. Rebuild the batch in "
+                   f"encounter_builder.py, or clear encounters.csv.")
+            print("\nNothing was entered — this batch is already in the EMR.")
+            popup(msg, title="EMR AutoMate — this batch is already entered")
+            return None
+
+        msg = (f"{n} of {total} encounter(s) in this batch were already entered on "
+               f"{', '.join(dupe_runs)}.\n\nRows: "
+               f"{', '.join(str(i) for i in dupe_rows)}\n\n"
+               f"Entering them again creates a second draft for those people.\n\n"
+               f"Drop the {n} already-entered row(s) and enter only the remaining "
+               f"{total - n}?\n\n"
+               f"(No = stop, so you can check. Run --resume to drop them permanently.)")
+        if not popup(msg, yes_no=True,
+                     title="EMR AutoMate — some rows already entered"):
+            print("Stopped. Nothing was entered.")
+            return None
+        skip = set(dupe_rows)
+        encounters = [e for i, e in enumerate(encounters, 1) if i not in skip]
+        print(f"  Dropped {n} already-entered row(s); {len(encounters)} left to enter.")
 
     # ── LAST-GATE COMPOSITION SUMMARY ──────────
     # The confirmation used to show only a count, so a batch where every coaching type
