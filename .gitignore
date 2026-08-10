@@ -72,3 +72,8 @@ __pycache__/
 Thumbs.db
 .DS_Store
 *.swp
+
+# Tracker Lite floor captures — real names + clinical descriptions (see tracker_import.py)
+tracker_capture.json
+tracker_capture.*.json
+*.imported.*.json
