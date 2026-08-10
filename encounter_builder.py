@@ -1537,12 +1537,17 @@ class EncounterBuilder(tk.Tk):
         )
 
         if not found:
+            # Name the real folder rather than describing one. Creating it here means
+            # "Set folder" in Tracker Lite has something to point at.
+            drop, created = ti.suggested_drop_folder()
             messagebox.showinfo(
                 "No captures found",
                 "No tracker_capture.json turned up.\n\n"
-                "In Tracker Lite, press “→ Send to Builder”. If you used “Set folder”, "
-                "it writes straight into your OneDrive/Drive folder; otherwise it lands "
-                "in Downloads and you move it across.\n\n"
+                f"Point Tracker Lite at:\n  {drop}\n"
+                + ("(just created for you)\n" if created else "")
+                + "\nIn Tracker Lite: Records → “Set folder” → pick that folder, then "
+                  "“→ Send to Builder”. On iPhone/Safari there is no folder picker — the "
+                  "send downloads the file and you move it there yourself.\n\n"
                 "Looked in:\n  " + "\n  ".join(
                     d for d in ti.default_search_dirs() if d))
             return
