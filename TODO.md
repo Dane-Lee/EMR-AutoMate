@@ -23,6 +23,38 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ---
 
+## ✅ DONE 2026-08-10 — duplicate-entry guard, import hardening, two papercuts
+
+Full narrative in `WORKLOG.md` Session 18. **A stale batch put 2 duplicate drafts in
+the EMR this morning** — Dane deleted them. Everything below exists so it can't recur.
+
+- [x] **Pre-entry gate.** `prepare_batch()` keys the batch against `encounter_log.csv`.
+      A wholly already-entered batch refuses and **can't be forced through the dialog**;
+      a partial overlap offers to drop just the entered rows. Defaults to not entering.
+- [x] **`--resume` spans every run**, not `max(run_started)`. A batch part-entered on
+      one day and resumed on another was handing back the earlier day's saved rows.
+- [x] **`test_dedup.py`** — the repo's first committed test. 12 tests, fake data,
+      fixtures in a temp dir. Run `python test_dedup.py`.
+- [x] **`mobile_import.py`**: backs up `encounters.csv` before overwriting it, and drops
+      captures already confirmed saved. Saved-set and key normalisation are imported
+      from the entry engine so there's one definition, not two that drift.
+- [x] **Redirected stdout no longer crashes.** 119 non-ASCII glyphs vs cp1252 meant
+      `Run-Encounters.ps1 > log.txt` died on the first `⚠` — and a redirect is exactly
+      when `phi_redact` turns redaction ON, so the crash was reserved for captured runs.
+- [x] **Roster tally clipping fixed** (was 494–758px in a 430px panel; now two lines,
+      345/350px worst case, all three counts kept). `ROSTER_PANEL_PX` ties the tally to
+      the grid minsize.
+- [x] **`debug/` filenames datestamped** (`%Y%m%d_%H%M%S`) — captures from different
+      days no longer interleave into a false chronology.
+- [x] **`roster_template.xlsx` held two REAL employees.** Never committed (`git log
+      --all` on the path was empty); real rows moved to `roster.nicknametest.xlsx`
+      (gitignored), template rewritten with placeholders. `.gitignore` was never
+      protecting it — the underscore carve-out is what makes that name commitable.
+- [x] **CLAUDE.md's `mobile_import.py` warning was stale** — the raw-name printing was
+      fixed back in `31b3d8d`. Corrected there and in `COPILOT_STUDIO_CAPTURE.md`.
+- [ ] **Still open: `--capture-assessment` has never run.** No `ASSESS_*` file exists.
+      Physical Assessment mapping (below) is blocked until it does.
+
 ## ✅ DONE — EMR "In Progress" modal (fixed 2026-07-24, live-confirmed 2026-07-29)
 
 EMR tech added a modal that blocks every save: "…navigate to the 'In Progress' case
@@ -49,8 +81,8 @@ Full narrative in `WORKLOG.md` Session 17.
       fill-in-the-blank template in `Target-JobCoaching` [1]; a heading in `NHO-HMA's` [1];
       an unbalanced quote in both `General-GroupClass` hints; a stray `”`; a first-person
       slip). List is in the 2026-07-31 chat; ask and I'll write it to a file.
-- [ ] **Roster tally line clips** — needs 448–670px in a 431px panel. Pre-existing, found
-      while measuring the redesign. Shorten the string or let it wrap.
+- [x] **Roster tally line clips** — FIXED 2026-08-10. Re-measured at 494–758px against a
+      430px panel; split to two lines, all three counts kept. See Session 18.
 - [ ] **19 descriptions still have no hint** — they're in the five tabs that have no hint
       rows at all (`Protective Recommendations`, `FocusNextEnc`, `NHO-HMA's`, `HMA's`,
       `CoachingDetailsCorrectiveAction`). Dane's to add if he wants them.
@@ -74,9 +106,8 @@ Full detail in `WORKLOG.md` Session 16.
       encounters.csv is fine" only if that fails too.
 - [ ] **Watch on the next batch:** if `already-in-progress` rows show up, that's Dane's
       own leftover drafts — clear them in the EMR first, or accept the skips.
-- [ ] Worth doing sometime: `debug/` filenames are `HHMMSS` with **no date**, so captures
-      from different days interleave and any sweep across them has to filter by mtime.
-      Datestamp the filenames (or subfolder per run) to remove the trap.
+- [x] **`debug/` filenames datestamped** — DONE 2026-08-10 (`%Y%m%d_%H%M%S`). The trap
+      sprang first: an 09:56 capture sat beside a 16:11 one from eleven days earlier.
 
 ## 🔨 ACTIVE — Builder: individual-entry mode built; needs Dane's visual eyeball (items 6+7)
 
