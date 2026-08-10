@@ -1529,7 +1529,7 @@ class EncounterBuilder(tk.Tk):
             messagebox.showerror("Import unavailable", f"Couldn't load the importer:\n{exc}")
             return
 
-        rows, problems, errors, found = ti.import_for_builder(
+        rows, pending, problems, errors, found = ti.import_for_builder(
             self.people,
             valid_coaching_types=set(ace.CHECKBOX_UUID_MAP),
             encounter_type=self.etype_var.get(),
@@ -1552,40 +1552,182 @@ class EncounterBuilder(tk.Tk):
                     d for d in ti.default_search_dirs() if d))
             return
 
-        if not rows and not problems:
+        if not rows and not pending and not problems:
             messagebox.showinfo("Nothing to import",
                                 f"{os.path.basename(found)} has no captures in it.")
             return
 
-        detail = [f"{len(rows)} capture(s) ready to add."]
+        detail = []
+        if rows:
+            detail.append(f"{len(rows)} capture(s) already have a name — ready to add.")
+        if pending:
+            total = sum(c["group_size"] for c in pending)
+            detail.append(f"{len(pending)} capture(s) still need a name "
+                          f"({total} encounter(s) once named). I'll walk you through them.")
         if problems:
-            detail.append(f"\n{len(problems)} could NOT be matched and will be left out:")
+            detail.append(f"\n{len(problems)} could NOT be used and will be left out:")
             for cap, why in problems[:8]:
-                detail.append(f"   • {cap['employee']} — {why}")
+                detail.append(f"   • {cap['employee'] or '(no name)'} — {why}")
             if len(problems) > 8:
                 detail.append(f"   … and {len(problems) - 8} more")
-            detail.append("\nFix those in Tracker Lite and send again.")
         if errors:
             detail.append("\n" + "\n".join(errors))
-        if rows:
-            detail.append(f"\nWork area and shift come from the roster, not the phone.")
-            detail.append("Add them to the batch?")
+        detail.append("\nWork area and shift come from the roster, not the phone.")
+        detail.append("Continue?")
 
-        if not rows:
-            messagebox.showwarning("Nothing could be matched", "\n".join(detail))
+        if not rows and not pending:
+            messagebox.showwarning("Nothing usable", "\n".join(detail))
             return
         if not messagebox.askyesno("Import from Tracker Lite", "\n".join(detail)):
             return
 
         for row in rows:
-            self.groups.append({
-                "rows": [row],
-                "label": (f"  1 person  ·  {row['coaching_type']}"
-                          f"{'  ·  ' + row['details'] if row['details'] else ''}"
-                          f"  ·  {row['date'] or 'today'}  ·  {row['employee']}"
-                          f"   [Tracker Lite]"),
-            })
+            self._add_tracker_row(row)
+
+        # Walk the nameless ones one at a time. Cancelling stops the walk but keeps
+        # everything already attached — a half-finished import is still progress.
+        named_count = len(rows)
+        for cap in pending:
+            added = self._attach_names_to_capture(cap, ti)
+            if added is None:          # Dane cancelled
+                break
+            named_count += added
+
         self._update_batch()
+
+        archived = ti.archive_capture(found) if named_count else None
+        messagebox.showinfo(
+            "Imported",
+            f"{named_count} encounter(s) added to the batch.\n\n"
+            + (f"The capture file was renamed to\n{os.path.basename(archived)}\n"
+               f"so the same encounters can't be imported twice."
+               if archived else
+               "The capture file was left in place."))
+
+    def _add_tracker_row(self, row):
+        """Add one imported row as its own group of one."""
+        self.groups.append({
+            "rows": [row],
+            "label": (f"  1 person  ·  {row['coaching_type']}"
+                      f"{'  ·  ' + row['details'] if row['details'] else ''}"
+                      f"  ·  {row['date'] or 'today'}  ·  {row['employee']}"
+                      f"   [Tracker Lite]"),
+        })
+
+    def _attach_names_to_capture(self, cap, ti):
+        """Ask who a nameless capture was about. Returns rows added, or None if cancelled.
+
+        The roster list is pre-filtered to the shift the capture was made on, because
+        that is the one thing the phone CAN say without naming anybody, and it cuts 261
+        names down to the ~100 who were actually there.
+        """
+        win = tk.Toplevel(self)
+        win.title("Who was this encounter with?")
+        win.configure(bg=UI_BG)
+        win.transient(self)
+        win.grab_set()
+
+        want = cap["group_size"]
+        head = (f"{cap['date']}   ·   {cap['coaching_type'] or 'no coaching type'}"
+                + (f"   ·   {cap['shift']} shift" if cap["shift"] else ""))
+        tk.Label(win, text=head, bg=UI_BG, fg=UI_TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(win, text=(f"Pick {want} " + ("person" if want == 1 else "people")
+                            + (f"  ·  captured on {cap['shift']} shift"
+                               if cap["shift"] else "")),
+                 bg=UI_BG, fg=UI_MUTED).pack(anchor="w", padx=14)
+        if cap["details"]:
+            tk.Label(win, text=f"Details: {cap['details']}", bg=UI_BG, fg=UI_MUTED,
+                     wraplength=520, justify="left").pack(anchor="w", padx=14, pady=(4, 0))
+        if cap["description"]:
+            tk.Label(win, text=cap["description"], bg=UI_BG, fg=UI_TEXT, wraplength=520,
+                     justify="left").pack(anchor="w", padx=14, pady=(6, 0))
+        elif "description" in cap["needs"]:
+            tk.Label(win, text="No description yet — add it in the form after importing.",
+                     bg=UI_BG, fg=UI_MUTED).pack(anchor="w", padx=14, pady=(6, 0))
+
+        search_var = tk.StringVar()
+        shift_only = tk.BooleanVar(value=bool(cap["shift"]))
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=14, pady=(10, 4))
+        ttk.Entry(bar, textvariable=search_var, width=30).pack(side="left")
+        if cap["shift"]:
+            ttk.Checkbutton(bar, text=f"only {cap['shift']} shift",
+                            variable=shift_only).pack(side="left", padx=8)
+        chosen_lbl = tk.Label(win, text="", bg=UI_BG, fg=CHECK_FG,
+                              font=("Segoe UI", 11, "bold"))
+        chosen_lbl.pack(anchor="w", padx=14)
+
+        listbox = tk.Listbox(win, selectmode="extended", height=14, width=52,
+                             bg=UI_CARD, fg=UI_TEXT, highlightthickness=0,
+                             selectbackground=CHECK_FG, activestyle="none")
+        listbox.pack(fill="both", expand=True, padx=14, pady=4)
+
+        shown = []
+
+        def refresh(*_):
+            needle = search_var.get().strip().lower()
+            shown.clear()
+            for p in self.people:
+                if shift_only.get() and cap["shift"] and p["shift"] != cap["shift"]:
+                    continue
+                if needle and needle not in p["name"].lower():
+                    continue
+                shown.append(p)
+            listbox.delete(0, tk.END)
+            for p in shown:
+                extra = " · ".join(x for x in (p["dept"], p["shift"]) if x)
+                listbox.insert(tk.END, f"{p['name']}    {extra}")
+            update_count()
+
+        def update_count(*_):
+            n = len(listbox.curselection())
+            chosen_lbl.config(
+                text=f"{n} of {want} selected" + ("  ✓" if n == want else ""))
+
+        search_var.trace_add("write", refresh)
+        shift_only.trace_add("write", refresh)
+        listbox.bind("<<ListboxSelect>>", update_count)
+        refresh()
+
+        result = {"added": None}
+
+        def do_add():
+            picks = [shown[i]["name"] for i in listbox.curselection()]
+            if not picks:
+                messagebox.showwarning("Pick someone",
+                                       "Select at least one person.", parent=win)
+                return
+            if len(picks) != want and not messagebox.askyesno(
+                    "Different number of people",
+                    f"This capture says {want} " + ("person" if want == 1 else "people")
+                    + f", but you picked {len(picks)}.\n\nUse {len(picks)}?",
+                    parent=win):
+                return
+            pairs, unmatched = ti.resolve_pending(cap, picks, self.people)
+            new_rows = ti.to_builder_rows(
+                pairs, encounter_type=self.etype_var.get(), category=self.cat_var.get())
+            for r in new_rows:
+                self._add_tracker_row(r)
+            result["added"] = len(new_rows)
+            win.destroy()
+
+        def do_skip():
+            result["added"] = 0
+            win.destroy()
+
+        foot = ttk.Frame(win)
+        foot.pack(fill="x", padx=14, pady=(4, 12))
+        ttk.Button(foot, text="Add to batch", style="Accent.TButton",
+                   command=do_add).pack(side="left")
+        ttk.Button(foot, text="Skip this one", command=do_skip).pack(side="left", padx=6)
+        ttk.Button(foot, text="Stop importing",
+                   command=win.destroy).pack(side="right")
+
+        win.update_idletasks()
+        win.geometry(f"+{self.winfo_rootx() + 80}+{self.winfo_rooty() + 60}")
+        self.wait_window(win)
+        return result["added"]
 
         # Archive so the same encounters can't be pulled in twice. Renamed, not deleted.
         archived = ti.archive_capture(found)
