@@ -44,20 +44,71 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 CAPTURE_FILENAME = "tracker_capture.json"
 SCHEMA = "emr-tracker-lite/capture@1"
 
-# Where to look, in order. The first existing directory wins. Dane's OneDrive sync folder
-# is the intended transport: Tracker Lite writes there from the browser, OneDrive carries
-# it to this PC, the builder picks it up. The repo folder is the fallback for a plain
-# browser download that was moved by hand.
+# The subfolder Tracker Lite drops captures into, inside whichever cloud folder is in use.
+TRACKER_SUBDIR = "EMR Tracker"
+
+
+def onedrive_root():
+    """Dane's OneDrive folder, from Windows itself — never guessed.
+
+    Windows sets %OneDrive% (and %OneDriveCommercial% for a work tenant) to the real sync
+    root, so the tenant name never has to be spelled out. It is spelled differently than
+    you would assume, too: this machine's is "OneDrive - ATI Holdings LLC", and an earlier
+    version of this file guessed "OneDrive - ATI Physical Therapy" and silently matched
+    nothing. Read it, don't predict it.
+    """
+    for var in ("OneDriveCommercial", "OneDrive", "OneDriveConsumer"):
+        path = os.environ.get(var, "").strip()
+        if path and os.path.isdir(path):
+            return path
+    return ""
+
+
 def default_search_dirs():
+    """Where to look for a capture, best first. The first existing file wins.
+
+    The OneDrive sync folder is the intended transport: Tracker Lite writes there from
+    the browser, OneDrive carries it to this PC, the builder picks it up. Downloads is
+    the fallback for the browsers with no File System Access API (Safari, all of iOS),
+    where the send is a plain download Dane moves himself.
+    """
     home = os.path.expanduser("~")
-    return [
-        os.environ.get("EMR_TRACKER_DIR", ""),
-        os.path.join(home, "OneDrive - ATI Physical Therapy", "EMR Tracker"),
-        os.path.join(home, "OneDrive", "EMR Tracker"),
-        os.path.join(home, "Google Drive", "EMR Tracker"),
-        os.path.join(home, "Downloads"),
+    dirs = [os.environ.get("EMR_TRACKER_DIR", "")]
+
+    root = onedrive_root()
+    if root:
+        # Known Folder Move is on for this account, so Downloads lives INSIDE OneDrive
+        # and ~/Downloads does not exist at all. The browser-download fallback lands
+        # there, so it has to be on this list or that path finds nothing.
+        dirs += [os.path.join(root, TRACKER_SUBDIR), os.path.join(root, "Downloads"), root]
+
+    # Google Drive's desktop client mounts a letter rather than a home subfolder, so
+    # check both shapes. Absent ones are skipped by the caller.
+    dirs += [
+        os.path.join(home, "Google Drive", TRACKER_SUBDIR),
+        os.path.join(home, "My Drive", TRACKER_SUBDIR),
+        os.path.join(home, "Downloads"),      # only exists without Known Folder Move
         _HERE,
     ]
+    return dirs
+
+
+def suggested_drop_folder():
+    """Where Dane should point Tracker Lite's "Set folder" — created if missing.
+
+    Returns (path, created). Falls back to Downloads if there is no OneDrive at all.
+    """
+    root = onedrive_root()
+    if not root:
+        return os.path.join(os.path.expanduser("~"), "Downloads"), False
+    target = os.path.join(root, TRACKER_SUBDIR)
+    if os.path.isdir(target):
+        return target, False
+    try:
+        os.makedirs(target, exist_ok=True)
+        return target, True
+    except OSError:
+        return root, False
 
 
 def find_capture_file(explicit=None):

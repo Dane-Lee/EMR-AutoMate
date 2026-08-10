@@ -53,15 +53,23 @@ That fallback is expected, not a failure.
 **In AutoMate** — nothing, if you used one of the folders it already checks:
 
 ```
-%EMR_TRACKER_DIR%                        (set this to override everything)
-~/OneDrive - ATI Physical Therapy/EMR Tracker
-~/OneDrive/EMR Tracker
+%EMR_TRACKER_DIR%              (set this to override everything)
+%OneDrive%\EMR Tracker         ← the drop folder, already created
+%OneDrive%\Downloads           ← where a Safari/iOS download lands
+%OneDrive%
 ~/Google Drive/EMR Tracker
-~/Downloads
+~/My Drive/EMR Tracker
+~/Downloads                    (only exists without Known Folder Move)
 the repo folder
 ```
 
-First match wins. Set `EMR_TRACKER_DIR` if your folder isn't on that list.
+First match wins. **The OneDrive path is read from Windows' own `%OneDrive%`, never
+spelled out** — on this machine it resolves to `OneDrive - ATI Holdings LLC`, and an
+earlier version of this file guessed "ATI Physical Therapy" and matched nothing.
+
+Note that Known Folder Move is on for this account: **Downloads lives inside OneDrive**
+and a bare `~/Downloads` does not exist. That matters for the Safari/iOS fallback, whose
+whole path is a browser download.
 
 ## Day to day
 
