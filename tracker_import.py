@@ -169,9 +169,9 @@ def load_captures(path):
         name = (item.get("employee") or "").strip()
         date = _mdy(item.get("date"))
         ctype = (item.get("coaching_type") or "").strip()
-        if not name:
-            errors.append(f"Capture {i}: no employee name — skipped.")
-            continue
+        # A capture with NO NAME is the normal floor case, not an error. Type, date and
+        # shift carry nothing identifying, which is exactly why they can travel through
+        # Google Drive at all; the name is attached here, against the roster.
         if not date:
             errors.append(f"Capture {i}: date '{item.get('date')}' isn't a date I "
                           f"recognise — skipped.")
@@ -179,37 +179,55 @@ def load_captures(path):
         details = item.get("details")
         if isinstance(details, list):
             details = "; ".join(str(d).strip() for d in details if str(d).strip())
+        try:
+            group_size = max(1, int(item.get("group_size") or 1))
+        except (TypeError, ValueError):
+            group_size = 1
+        needs = item.get("needs")
+        if not isinstance(needs, list):
+            needs = ([] if name else ["name"]) + \
+                    ([] if (item.get("description") or "").strip() else ["description"])
         captures.append({
-            "employee": name,
+            "employee": name,                     # '' = attach it in the builder
+            "group_size": group_size,
             "date": date,
+            "shift": (item.get("shift") or "").strip(),
             "coaching_type": ctype,
             "details": (details or "").strip(),
             "description": (item.get("description") or "").strip(),
             "what_prompted": (item.get("what_prompted") or "").strip(),
+            "needs": [str(n) for n in needs],
             "capture_id": str(item.get("id") or f"row{i}"),
         })
     return captures, errors
 
 
 def match_to_roster(captures, people, valid_coaching_types=None):
-    """Resolve each capture against the roster. Returns (matched, problems).
+    """Sort captures into what can be used now and what still needs Dane.
 
-    matched  — [(capture, person)] ready to become builder rows
-    problems — [(capture, reason)] for Dane to look at; nothing is guessed
+    Returns (matched, pending, problems):
+      matched  — [(capture, person)] a name was supplied and it resolved
+      pending  — [capture] no name yet: attach it in the builder. This is the FLOOR
+                 case, not a failure — a group of eight has no single name to send.
+      problems — [(capture, reason)] a name WAS supplied and could not be trusted, or
+                 the coaching type isn't one the EMR takes. Nothing is guessed.
 
     Name matching reuses name_match, so a nickname resolves here exactly as it does in
     the entry engine, and an ambiguous name is REFUSED rather than resolved to whoever
-    sorts first. Coaching type is validated against AutoMate's own list.
+    sorts first.
     """
     names = [p["name"] for p in people]
     by_name = {p["name"]: p for p in people}
-    matched, problems = [], []
+    matched, pending, problems = [], [], []
 
     for cap in captures:
         if valid_coaching_types and cap["coaching_type"] and \
                 cap["coaching_type"] not in valid_coaching_types:
             problems.append((cap, f"coaching type '{cap['coaching_type']}' is not one "
                                   f"the EMR accepts"))
+            continue
+        if not cap["employee"] or cap.get("group_size", 1) > 1:
+            pending.append(cap)
             continue
         idx, how = name_match.find_matches(cap["employee"], names)
         if len(idx) == 1:
@@ -219,7 +237,25 @@ def match_to_roster(captures, people, valid_coaching_types=None):
                                   f"too ambiguous to pick one"))
         else:
             problems.append((cap, "no one on the roster matches that name"))
-    return matched, problems
+    return matched, pending, problems
+
+
+def resolve_pending(capture, chosen_names, people):
+    """Attach names to a pending capture. Returns (rows, unmatched_names).
+
+    `chosen_names` are roster names Dane picked in the builder, so they are exact by
+    construction — but they are still resolved through the roster rather than trusted,
+    because that lookup is what supplies department, division and shift.
+    """
+    by_name = {p["name"]: p for p in people}
+    rows, unmatched = [], []
+    for nm in chosen_names:
+        person = by_name.get(nm)
+        if not person:
+            unmatched.append(nm)
+            continue
+        rows.append((capture, person))
+    return rows, unmatched
 
 
 def to_builder_rows(matched, encounter_type="In Person", category=""):
@@ -267,17 +303,19 @@ def import_for_builder(people, path=None, valid_coaching_types=None,
                        encounter_type="In Person", category=""):
     """One call for the builder: find, load, match, convert.
 
-    Returns (rows, problems, errors, path). `rows` are builder rows ready to add;
-    `problems` are captures that could not be resolved, each with a reason.
+    Returns (rows, pending, problems, errors, path):
+      rows     — builder rows ready to add as-is (a name came with the capture)
+      pending  — captures still needing a name attached in the builder
+      problems — captures that could not be trusted, each with a reason
     """
     found = find_capture_file(path)
     if not found:
-        return [], [], [f"No {CAPTURE_FILENAME} found. Looked in: " +
-                        ", ".join(d for d in default_search_dirs() if d)], None
+        return [], [], [], [f"No {CAPTURE_FILENAME} found. Looked in: " +
+                            ", ".join(d for d in default_search_dirs() if d)], None
     captures, errors = load_captures(found)
-    matched, problems = match_to_roster(captures, people, valid_coaching_types)
+    matched, pending, problems = match_to_roster(captures, people, valid_coaching_types)
     rows = to_builder_rows(matched, encounter_type=encounter_type, category=category)
-    return rows, problems, errors, found
+    return rows, pending, problems, errors, found
 
 
 def _cli():
@@ -290,19 +328,31 @@ def _cli():
     if problem:
         sys.exit(problem)
 
-    rows, problems, errors, found = import_for_builder(
+    rows, pending, problems, errors, found = import_for_builder(
         people, path, valid_coaching_types=set(ace.CHECKBOX_UUID_MAP))
     for e in errors:
         print(f"  ! {e}")
     if not found:
         return
     print(f"Capture file: {found}")
-    print(f"  ready to import : {len(rows)}")
-    print(f"  needs attention : {len(problems)}")
+    print(f"  ready to add        : {len(rows)}")
+    print(f"  need a name         : {len(pending)}  "
+          f"({sum(c['group_size'] for c in pending)} encounter(s) once named)")
+    print(f"  needs attention     : {len(problems)}")
+
+    if pending:
+        # No names here to redact — that is the point of a floor capture.
+        print("\n  Waiting on a name:")
+        for c in pending:
+            who = f"group of {c['group_size']}" if c["group_size"] > 1 else "1 person"
+            shift = f"{c['shift']} shift" if c["shift"] else "shift not noted"
+            print(f"    {c['date']}  {shift:<16} {who:<14} "
+                  f"{c['coaching_type'] or '(no type)':<38} "
+                  f"{'needs: ' + ', '.join(c['needs']) if c['needs'] else ''}")
     for cap, why in problems:
         print(f"    - {ph(cap['employee'])} [{cap['coaching_type'] or 'no type'}] — {why}")
     if rows:
-        print("\n  Rows (redacted):")
+        print("\n  Rows ready (redacted):")
         for r in rows:
             print(f"    {ph(r['employee']):<14} {r['date']}  {r['coaching_type']:<38} "
                   f"{r['department'] or '(no dept)':<18} {pd(r['description'])}")

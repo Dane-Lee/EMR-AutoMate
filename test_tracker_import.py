@@ -76,7 +76,7 @@ def test_controlled_values_come_from_the_roster_not_the_phone():
     poisoned["division"] = "WRONG DIVISION"
     poisoned["shift"] = "3rd"
     caps, _ = ti.load_captures(write_capture([poisoned]))
-    matched, _ = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
+    matched, _pending, _problems = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
     row = ti.to_builder_rows(matched)[0]
     check("department from roster", row["department"], "Frame Weld")
     check("division from roster", row["division"], "Weld")
@@ -92,7 +92,7 @@ def test_row_matches_automate_csv_columns():
     print("\nRows match AutoMate's CSV schema exactly")
     import ati_coaching_encounter as ace
     caps, _ = ti.load_captures(write_capture([cap()]))
-    matched, _ = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
+    matched, _pending, _problems = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
     row = ti.to_builder_rows(matched)[0]
     check("key order identical to CSV_COLUMNS", list(row.keys()), ace.CSV_COLUMNS)
 
@@ -103,7 +103,7 @@ def test_unknown_coaching_type_is_refused():
     """A type the EMR does not accept must be refused, not corrected."""
     print("\nAn unknown coaching type is refused, not corrected")
     caps, _ = ti.load_captures(write_capture([cap(coaching_type="Vibes Coaching")]))
-    matched, problems = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
+    matched, pending, problems = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
     check("not matched", len(matched), 0)
     check("reported with a reason", "not one the EMR accepts" in problems[0][1], True)
 
@@ -113,7 +113,7 @@ def test_ambiguous_name_is_refused():
     twins = PEOPLE + [{"name": "Smith, Janet", "title": "Tech", "shift": "2nd",
                        "dept": "Assembly", "div": "Assembly"}]
     caps, _ = ti.load_captures(write_capture([cap(employee="Smith, J")]))
-    matched, problems = ti.match_to_roster(caps, twins, VALID_TYPES)
+    matched, pending, problems = ti.match_to_roster(caps, twins, VALID_TYPES)
     check("not matched", len(matched), 0)
     check("reported", bool(problems), True)
 
@@ -121,7 +121,7 @@ def test_ambiguous_name_is_refused():
 def test_unknown_name_is_refused():
     print("\nA name not on the roster is refused")
     caps, _ = ti.load_captures(write_capture([cap(employee="Nobody, Here")]))
-    matched, problems = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
+    matched, pending, problems = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
     check("not matched", len(matched), 0)
     check("reason given", "no one on the roster" in problems[0][1], True)
 
@@ -133,8 +133,53 @@ def test_bad_rows_are_dropped_with_a_reason_not_repaired():
         cap(employee="", cid="noname"),
         cap(date="not-a-date", cid="baddate"),
     ]))
-    check("only the good one survives", [c["capture_id"] for c in caps], ["ok"])
-    check("both failures explained", len(errors), 2)
+    check("bad date dropped, nameless KEPT", [c["capture_id"] for c in caps],
+          ["ok", "noname"])
+    check("one failure explained", len(errors), 1)
+
+
+def test_nameless_capture_is_pending_not_a_problem():
+    """The floor case: no name on the phone, attached in the builder."""
+    print("\nA nameless capture is pending, not a problem")
+    caps, _ = ti.load_captures(write_capture([cap(employee="")]))
+    matched, pending, problems = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
+    check("not auto-matched", len(matched), 0)
+    check("NOT treated as a problem", len(problems), 0)
+    check("is pending", len(pending), 1)
+    check("knows it needs a name", "name" in pending[0]["needs"], True)
+
+
+def test_group_capture_is_pending_even_when_named():
+    """A group of eight has no single name to send, so it is always resolved here."""
+    print("\nA group capture is always pending")
+    c = cap(employee="Smith, Jane"); c["group_size"] = 8
+    caps, _ = ti.load_captures(write_capture([c]))
+    matched, pending, _ = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
+    check("pending, not auto-matched", (len(matched), len(pending)), (0, 1))
+    check("group size preserved", pending[0]["group_size"], 8)
+
+
+def test_resolving_a_group_makes_one_row_per_person():
+    print("\nResolving a group makes one row per person, each roster-sourced")
+    c = cap(employee=""); c["group_size"] = 2
+    caps, _ = ti.load_captures(write_capture([c]))
+    _, pending, _ = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
+    pairs, unmatched = ti.resolve_pending(pending[0], ["Smith, Jane", "Doe, John"], PEOPLE)
+    rows = ti.to_builder_rows(pairs)
+    check("two rows", len(rows), 2)
+    check("no unmatched", unmatched, [])
+    check("each row got ITS OWN roster values",
+          [(r["employee"], r["department"], r["shift"]) for r in rows],
+          [("Smith, Jane", "Frame Weld", "1st"), ("Doe, John", "Assembly", "2nd")])
+
+
+def test_capture_shift_never_overrides_the_roster():
+    """The phone notes which shift it was; the roster still decides the row value."""
+    print("\nCapture shift does not override the roster")
+    c = cap(); c["shift"] = "3rd"             # Smith, Jane is 1st on the roster
+    caps, _ = ti.load_captures(write_capture([c]))
+    matched, _p, _q = ti.match_to_roster(caps, PEOPLE, VALID_TYPES)
+    check("roster wins", ti.to_builder_rows(matched)[0]["shift"], "1st")
 
 
 # ── format handling ──────────────────────────────────────────────────────────
@@ -171,7 +216,7 @@ def test_bare_array_is_tolerated():
 
 def test_missing_file_is_reported_not_crashed():
     print("\nA missing capture file is reported, not crashed")
-    rows, problems, errors, found = ti.import_for_builder(
+    rows, pending, problems, errors, found = ti.import_for_builder(
         PEOPLE, path=os.path.join(_TMP, "nope.json"))
     check("nothing found", found, None)
     check("explained", bool(errors), True)
