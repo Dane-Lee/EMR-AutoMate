@@ -69,6 +69,11 @@ BLANK = ""
 # Checked names get a filled box + a tinted row so the pick is obvious at a glance
 # across a 261-name list — the faint "X" prefix was too easy to lose track of.
 CHECK_ON = "☑"
+
+# Narrowest the roster column is ever laid out at (its grid minsize). Anything drawn
+# into that panel has to fit this, not the window width — the roster tally was written
+# against the window and clipped for weeks because nothing tied the two together.
+ROSTER_PANEL_PX = 430
 CHECK_OFF = "☐"
 CHECK_BG = "#2b2517"       # amber wash — the checked row
 CHECK_FG = "#f0a32b"
@@ -451,7 +456,7 @@ class EncounterBuilder(tk.Tk):
         # The roster takes the slack, not the form: the group panel needs a fixed
         # ~490px and no more, so every spare pixel goes to the name list — which is
         # the thing you actually read 262 lines of.
-        self.grid_columnconfigure(0, weight=1, minsize=430)
+        self.grid_columnconfigure(0, weight=1, minsize=ROSTER_PANEL_PX)
         # The form panel needs a firm width: its content is now a scroll canvas (which
         # requests no width of its own), and the coaching-type radios run two wide
         # columns. Without a minsize the column collapses and clips the right column.
@@ -811,8 +816,13 @@ class EncounterBuilder(tk.Tk):
         # many names would break the "exactly one loaded" invariant).
         self._roster_group_only = [buttons, pick]
 
+        # justify: the two lines are left-aligned, not centred on each other.
+        # wraplength: a backstop for the one unbounded part — an employee name in
+        # individual mode. The longest real one measures 378px, but a longer hire
+        # should wrap rather than silently clip, which is the bug being fixed here.
         self.count_label = ttk.Label(frame, text="", font=("Segoe UI", 13, "bold"),
-                                     foreground=CHECK_FG)
+                                     foreground=CHECK_FG, justify="left",
+                                     wraplength=ROSTER_PANEL_PX)
         self.count_label.grid(row=8, column=0, sticky="w", pady=(4, 0))
         self.roster_hint = ttk.Label(frame, text="", foreground=UI_MUTED, wraplength=600)
         self.roster_hint.grid(row=9, column=0, sticky="w")
@@ -945,9 +955,17 @@ class EncounterBuilder(tk.Tk):
             # never quietly include someone you can't currently see.
             hidden_checks = len(self.checked - {p["name"] for p in self.shown})
             extra = f"   ({hidden_checks} checked but hidden)" if hidden_checks else ""
-            lead = f"{CHECK_ON} {len(self.checked)} checked{extra}      "
+            lead = f"{CHECK_ON} {len(self.checked)} checked{extra}"
+        # TWO LINES, deliberately. On one line this needed 494-758px in a 431px panel
+        # and had been clipping since before the redesign — the roster totals simply
+        # ran off the edge. Measured at Segoe UI 13 bold: the lead peaks at 345px
+        # (261 checked, 155 of them hidden) or 378px (longest real name in individual
+        # mode), and the totals row is a fixed 350px at three digits. Both clear 431
+        # with room, and no number had to be dropped to get there. `shown` is also
+        # filtered by the search box and role filters, so it is NOT derivable from
+        # `filtered_out` — the three counts are independent and all three are kept.
         self.count_label.config(
-            text=f"{lead}{len(self.shown)} shown · {filtered_out} filtered out · "
+            text=f"{lead}\n{len(self.shown)} shown · {filtered_out} filtered out · "
                  f"{len(self.people)} on roster")
 
     def _on_click(self, event):
