@@ -89,16 +89,50 @@ def _date_mdy(rec):
 COLUMNS = ["employee", "date", "encounter_type", "department", "division", "category",
            "shift", "coaching_type", "details", "description", "what_prompted"]
 
+BAK = os.path.join(_HERE, "encounters.bak.csv")
 
-def import_mobile(json_path, out_path=None):
-    """Convert a mobile export JSON into encounters.csv. Returns (rows, warnings)."""
+
+def _already_entered():
+    """(keys, key_fn) for encounters the audit log records as CONFIRMED saved.
+
+    BOTH come from the entry engine, so there is exactly one definition of "already
+    entered" and one normalisation of the key. A second, drifting copy of either is
+    how a dedup quietly stops matching — the engine strips every field, and a caller
+    that forgets to would miss every padded name and import the duplicate anyway.
+
+    Returns an empty set and a None key_fn if the engine or its log isn't available;
+    an import must still work on a machine that has never run a batch.
+    """
+    try:
+        import ati_coaching_encounter as engine
+        return set(engine._saved_keys_by_run()), engine._encounter_key
+    except Exception:
+        return set(), None
+
+
+def import_mobile(json_path, out_path=None, skip_entered=True):
+    """Convert a mobile export JSON into encounters.csv. Returns (rows, warnings).
+
+    Backs up any existing batch to encounters.bak.csv first. This used to overwrite
+    encounters.csv outright, which on a bad day silently destroys a batch that was
+    half entered — and the audit log only knows what was SAVED, so the unsaved
+    remainder would be gone with no way to reconstruct it.
+
+    With `skip_entered`, records matching a confirmed save in encounter_log.csv are
+    dropped here rather than at the desk. The entry engine gates on this too (see
+    prepare_batch), so this is belt-and-braces — but a captured encounter is most
+    likely to be a duplicate of one already entered, and the earlier it's dropped the
+    fewer chances there are to click through the warning.
+    """
     out_path = out_path or OUT
     with open(json_path, encoding="utf-8-sig") as fh:
         data = json.load(fh)
     records = data.get("records", data if isinstance(data, list) else [])
 
+    entered, key_fn = _already_entered() if skip_entered else (set(), None)
     rows, warnings = [], []
     skipped = 0
+    already = 0
     for r in records:
         # Only enter captures marked ready — skip already-'exported' ones.
         if r.get("captureStatus") != "ready_for_export":
@@ -116,7 +150,7 @@ def import_mobile(json_path, out_path=None):
         if not dept and (r.get("station") or r.get("department")):
             warnings.append(f"{ph(name)}: station/department "
                             f"'{r.get('station') or r.get('department')}' didn't resolve")
-        rows.append({
+        row = {
             "employee": first_last_to_last_first(name),
             "date": _date_mdy(r),
             "encounter_type": "In Person",
@@ -128,7 +162,26 @@ def import_mobile(json_path, out_path=None):
             "details": "",
             "description": (r.get("summaryShort") or "").strip(),
             "what_prompted": "Specialist Initiated",
-        })
+        }
+        key = key_fn(row["employee"], row["date"], row["coaching_type"]) if key_fn else None
+        if key is not None and key in entered:
+            already += 1
+            warnings.append(f"{ph(name)}: already entered on a previous run — dropped")
+            continue
+        rows.append(row)
+
+    # Preserve whatever batch is on disk before replacing it. The entry engine's own
+    # backup lives at the same path and is likewise a single generation deep; that is
+    # the established convention here, not an oversight.
+    if os.path.exists(out_path):
+        try:
+            with open(out_path, newline="", encoding="utf-8-sig") as src:
+                existing = src.read()
+            if existing.strip():
+                with open(BAK, "w", newline="", encoding="utf-8-sig") as dst:
+                    dst.write(existing)
+        except OSError as e:
+            warnings.insert(0, f"could not back up the existing batch: {e}")
 
     with open(out_path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.DictWriter(fh, fieldnames=COLUMNS)
@@ -136,6 +189,8 @@ def import_mobile(json_path, out_path=None):
         w.writerows(rows)
     if skipped:
         warnings.insert(0, f"skipped {skipped} record(s) not marked 'ready_for_export'")
+    if already:
+        warnings.insert(0, f"dropped {already} record(s) already entered on a previous run")
     return rows, warnings
 
 

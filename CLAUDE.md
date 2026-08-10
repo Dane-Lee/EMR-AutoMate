@@ -173,5 +173,8 @@ Route anything that could carry PHI through `phi_redact`:
 - `pd(text)` — free-text clinical descriptions → `[description redacted: 46 chars]`
 
 They pass values through unchanged on a real terminal, so Dane still sees real names.
-**`mobile_import.py` does not do this** — it prints names raw and must be fixed before
-it is used again.
+
+`mobile_import.py` **was** the exception — it printed names raw. It was fixed in
+`31b3d8d`; every name now goes through `ph()` and descriptions are never printed. The
+values it still prints unredacted are controlled vocabulary (department, coaching type,
+date), which is the same choice the rest of the tool makes.
