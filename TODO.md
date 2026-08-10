@@ -52,8 +52,10 @@ the EMR this morning** — Dane deleted them. Everything below exists so it can'
       protecting it — the underscore carve-out is what makes that name commitable.
 - [x] **CLAUDE.md's `mobile_import.py` warning was stale** — the raw-name printing was
       fixed back in `31b3d8d`. Corrected there and in `COPILOT_STUDIO_CAPTURE.md`.
-- [ ] **Still open: `--capture-assessment` has never run.** No `ASSESS_*` file exists.
-      Physical Assessment mapping (below) is blocked until it does.
+- [x] **`--capture-assessment` ran (11:52).** First-screen parity with the coaching form
+      **confirmed identical** — see the assessments section below. Field mapping needed
+      no work; the one open item is the exact tile label, which the scrubber redacted
+      out of its own capture (allowlist since widened, `1bb5791`).
 
 ## ✅ DONE — EMR "In Progress" modal (fixed 2026-07-24, live-confirmed 2026-07-29)
 
@@ -150,13 +152,26 @@ fuller automation once we see the forms.
       **fill depth = decide after we see the form**; **first type = Physical Assessment**
       (PA Follow-Up comes after). Exact tile labels still unknown — the capture mode
       below now lists them from the modal rather than guessing.
-- [~] **Capture the form:** built `--capture-assessment "Last, First" ["Tile Label"]`
-      in `ati_coaching_encounter.py` — reuses the add-case navigation, prints the
-      modal's tile labels + the first-screen field labels, and snaps the scrubbed form
-      to `./debug` (`ASSESS_*.html`). Nothing saved. **Next: Dane runs it on one
-      employee; then I read the debug HTML and map fields.**
-- [ ] **Map fields** against the captured Physical Assessment first screen, then decide
-      fill depth (first screen only vs more).
+- [x] **Capture the form — DONE 2026-08-10.** Dane ran `--capture-assessment`; captures
+      landed at `debug/20260810_1152*_ASSESS_00_add_case_modal.html` and
+      `..._ASSESS_01_step1_form.html`. Nothing saved.
+- [x] **Map fields — DONE 2026-08-10, and the answer is "nothing to map".** The
+      assessment first screen is **byte-identical to the coaching first screen**: same
+      15 controls, same 5 labels (Date of Encounter / Department / Division / Category /
+      Shift), same `encounteredType` radios (In Person · Via Phone or Microsoft Teams ·
+      Via Telehealth Platform · Via Email), same `react-select-3..6` + `Category1..3` +
+      `shiftDetails`, same `.save-btn` / `.next-btn`. Diffed both ways: zero controls
+      unique to either. **This is the first-screen parity PLAN.md said to VERIFY before
+      building Gap B** — it holds, so the existing step-1 fill code works unchanged.
+- [ ] **BLOCKED on one string: the exact tile label.** The capture's tile text came back
+      `[redacted:15/19/25/…]` — `phi_redact`'s allowlist knew "Assessment" and
+      "Assessment Type" but none of the individual case types, so the capture scrubbed
+      out the one thing it existed to learn. Allowlist widened (commit `1bb5791`), so a
+      re-run now shows them. **They also print to Dane's terminal on every run** — one
+      line from him is enough. `--capture-assessment` defaults to matching
+      "Physical Assessment"; if that substring isn't the real tile text, the click misses.
+- [ ] **Decide fill depth** (first screen only vs more) — now answerable: the first
+      screen is free, since it's the same form already automated.
 - [ ] **Wire + prove on ONE draft** before any batch.
 - [ ] Parked/related: HMA-score double-entry (PLAN.md B-future) is a bigger, separate build.
 
