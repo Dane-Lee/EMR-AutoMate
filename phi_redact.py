@@ -72,6 +72,19 @@ UI_CHROME = [
     "Department", "Division", "Category", "Shift",
     "What Prompted Coaching", "Description", "Details", "Encounter Type",
     "Assessment", "Assessment Type", "Type", "Name", "Date", "Status", "Actions",
+    # Case-type tiles in the "Select Assessment Type" modal. Static UI strings, but
+    # they were NOT here, so the 2026-08-10 capture came back as [redacted:19] and the
+    # one thing the capture existed to learn was the one thing scrubbed out of it.
+    #
+    # Listing a label that turns out not to exist costs nothing: an allowlist entry
+    # only ever permits an EXACT match, so a wrong name matches no text and reveals no
+    # PHI. That asymmetry is why widening this list is safe while guessing a value to
+    # TYPE into a form is not — the failure modes are opposites.
+    "Physical Assessment", "PA Follow-Up", "PA Follow Up", "Physical Assessment Follow-Up",
+    "HMA", "HMA's", "Health Management Assessment",
+    "Office", "Office Visit", "Task", "Task Assessment",
+    "Work Readiness", "Work Readiness Assessment",
+    "Select Assessment Type", "Ergonomic Assessment", "Follow-Up", "Follow Up",
     # Generic table/UI words
     "of", "to", "and", "or", "Show", "Hide", "All", "None", "Required", "Optional",
 ]
