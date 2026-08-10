@@ -294,6 +294,13 @@ phi_redact.register_vocab(WHAT_PROMPTED_OPTIONS)
 phi_redact.register_vocab(COACHING_TYPE_UUIDS)          # coaching type names
 for _group in CHECKBOX_UUID_MAP.values():
     phi_redact.register_vocab(_group)                   # detail-checkbox labels
+# The new "In Progress" navigation prompt (EMR chrome, not PHI) — register so a debug
+# capture of it stays readable for selector work.
+phi_redact.register_vocab([
+    "There are active encounters that have been saved 'In Progress'.",
+    "Would you like to navigate to the 'In Progress' case list?",
+    "In Progress", "Yes", "No",
+])
 
 # ─────────────────────────────────────────────
 # HELPERS
@@ -308,6 +315,16 @@ def name_pattern(full_name):
     parts = [p.strip() for p in str(full_name).split(",") if p.strip()]
     tokens = [r"\s+".join(re.escape(w) for w in p.split()) for p in parts]
     return re.compile(r"\s*,\s*".join(tokens), re.IGNORECASE)
+
+
+class AlreadyInProgress(Exception):
+    """The employee already has an In Progress case, so the EMR won't let us add one.
+
+    Not an error in the batch's sense: it's this employee's state in the EMR, it says
+    nothing about the CSV or the automation, and it will keep happening until Dane
+    closes the existing draft. Kept separate so it doesn't trip the circuit breaker
+    and doesn't hide in the audit behind a generic timeout.
+    """
 
 
 async def snap(page: Page, label: str):
@@ -657,6 +674,31 @@ async def locate_employee(page: Page, full_name):
     await snap(page, "02_employee_list")
 
     candidates = await roster_names(page)
+
+    # An empty list is a RENDER failure, not a bad name — the same distinction
+    # preflight_names already makes ("roster-empty", not 77 bad names), which this
+    # function was missing. Verified on the 2026-07-29 run: the two rows that failed
+    # here had 0 `.name` spans in their 02 capture (a 19,770-byte skeleton of 10
+    # placeholder `.details` rows) where a healthy capture in the same run had 938.
+    # roster_names() waits 30s for a `.name` to attach and then returns [], which
+    # find_matches turns into "couldn't find employee" — sending Dane to fix a name
+    # the pre-flight had already matched against the full roster. Reload and match
+    # against the UNFILTERED roster (the search box is only a speed-up, and it is
+    # what emptied the list); say "the page didn't load" only if that fails too.
+    if not candidates:
+        print("  Employee list came back empty — reloading and retrying once...")
+        await page.goto(BASE_URL)
+        await page.wait_for_load_state("networkidle")
+        await dismiss_in_progress_prompt(page)
+        candidates = await roster_names(page)
+        await snap(page, "02b_employee_list_retry")
+        if not candidates:
+            raise RuntimeError(
+                "The employee list didn't load — 0 names on the page, after a reload. "
+                "That's a page/render failure, NOT a name problem: encounters.csv is "
+                "fine, leave it alone. Re-run with --resume once the EMR responds."
+            )
+
     idx, how = name_match.find_matches(full_name, candidates)
 
     if len(idx) == 1:
@@ -739,6 +781,45 @@ async def _looks_logged_out(page: Page) -> bool:
     return False
 
 
+# The EMR tech team added a modal (seen 2026-07-23) that pops on the dashboard whenever
+# there are drafts, and blocks the next save until it's answered: "There are active
+# encounters that have been saved 'In Progress'. Would you like to navigate to the 'In
+# Progress' case list?" with Yes / No. Since the batch is mid-draft, there are ALWAYS
+# in-progress cases after row 1, so it fires every row. We answer NO — stay put and keep
+# drafting; Yes would navigate away and derail the batch.
+_INPROGRESS_PROMPT_RE = re.compile(r"navigate to the|active encounters", re.I)
+
+
+async def dismiss_in_progress_prompt(page: Page) -> bool:
+    """Click 'No' on the EMR's 'navigate to the In Progress case list?' modal if it's up.
+
+    Detected on the LIVE DOM (so redaction of debug HTML doesn't affect it) and entirely
+    non-fatal: returns quickly when the modal isn't there, never raises. Snaps the modal
+    (scrubbed) the first time it's seen so the real markup is on record if the click ever
+    needs a more specific selector.
+    """
+    try:
+        prompt = page.get_by_text(_INPROGRESS_PROMPT_RE)
+        if await prompt.count() == 0 or not await prompt.first.is_visible():
+            return False
+        await snap(page, "INPROGRESS_prompt")
+        # "No" keeps us on the current page. Prefer the exact-named button; fall back to
+        # any visible button whose text is just "No".
+        no_btn = page.get_by_role("button", name="No", exact=True)
+        if await no_btn.count() == 0:
+            no_btn = page.locator("button", has_text=re.compile(r"^\s*No\s*$", re.I))
+        await no_btn.first.click(timeout=5000)
+        await page.wait_for_timeout(400)
+        print("  Dismissed the EMR 'In Progress' prompt (clicked No).")
+        return True
+    except Exception as e:
+        # If it's up but we couldn't clear it, say so and leave it — the batch's existing
+        # error handling / circuit breaker take over, and the snap above is captured.
+        print(f"  Note: couldn't auto-dismiss the In Progress prompt: "
+              f"{str(e).splitlines()[0]}")
+        return False
+
+
 async def open_dashboard(page: Page) -> bool:
     """Go to the dashboard with the roster loaded, recovering from an expired session.
 
@@ -754,8 +835,13 @@ async def open_dashboard(page: Page) -> bool:
     for _ in range(4):
         await page.goto(BASE_URL)
         await page.wait_for_load_state("networkidle")
+        # Clear the new "In Progress" modal if it popped on load — it overlays the
+        # roster and would block the next click. It can also render a beat after
+        # networkidle, so we try again once the roster is attached.
+        await dismiss_in_progress_prompt(page)
         try:
             await page.wait_for_selector(_NAME_SEL, state="attached", timeout=15000)
+            await dismiss_in_progress_prompt(page)
             return True
         except Exception:
             pass
@@ -794,16 +880,44 @@ async def fill_encounter(page: Page, ENCOUNTER):
     # The Employee Overview keeps loading (cases / follow-ups / portfolio) after
     # networkidle and re-renders, so let it settle before clicking Add Case.
     await page.wait_for_timeout(2500)
+    # The "In Progress" prompt can also surface here, over the employee overview —
+    # clear it before reaching for Add Case.
+    await dismiss_in_progress_prompt(page)
     print("Employee selected.")
     await snap(page, "03_employee_selected")
 
     # ── ADD CASE ───────────────────────────────
     add_case_btn = page.locator("button:has-text('+ Add Case')")
     await add_case_btn.wait_for(state="visible", timeout=20000)
+
+    # The EMR DISABLES "+ Add Case" for an employee who already has an In Progress
+    # case. Verified on the 2026-07-29 run, from the capture taken BEFORE the click:
+    # all 4 rows that failed had `<button ... disabled="">+ Add Case</button>` plus an
+    # "In Progress" badge, and all 52 rows that succeeded had neither.
+    #
+    # A disabled button is not a slow one, so the old force-click fallback was actively
+    # harmful: force=True skips the actionability checks and clicks a disabled button,
+    # which does nothing, silently. The modal never opened and the tile click below then
+    # burned its full 30s default timeout waiting for markup that was never coming —
+    # 2 minutes of the run spent to produce four "Timeout 30000ms exceeded" notes that
+    # named neither the cause nor the fix. Wait for *enabled*, then say what's wrong.
+    for _ in range(16):                       # 8s grace for a slow render
+        if await add_case_btn.is_enabled():
+            break
+        await page.wait_for_timeout(500)
+    else:
+        await snap(page, "ALREADY_INPROGRESS")
+        raise AlreadyInProgress(
+            "'+ Add Case' is disabled for this employee — the EMR does that when they "
+            "already have an In Progress case. Finalize or delete that draft in the "
+            "EMR, then re-run with --resume. Nothing was entered for this row."
+        )
+
     try:
         await add_case_btn.click(timeout=8000)
     except Exception:
-        # If a late re-render keeps intercepting the click, force it.
+        # Enabled but something is sitting over it (a late re-render). Force is
+        # legitimate here — the button can actually receive the click.
         print("  Add Case retry (force-click)...")
         await add_case_btn.click(force=True)
     await page.wait_for_timeout(800)
@@ -812,8 +926,16 @@ async def fill_encounter(page: Page, ENCOUNTER):
     # In the "Select Assessment Type" modal, click the Coaching Encounter tile.
     # Each option is a `.assessment-type-container` div — click the container so the
     # selection registers (clicking just the text doesn't always trigger it).
+    # Bounded well under the 30s default: if the modal isn't up by now it isn't coming,
+    # and a clear message beats half a minute of waiting to say "timeout".
     tile = page.locator(".assessment-type-container", has_text="Coaching Encounter")
-    await tile.click()
+    try:
+        await tile.click(timeout=10000)
+    except Exception:
+        raise RuntimeError(
+            "The 'Select Assessment Type' modal never opened after '+ Add Case' "
+            "(no .assessment-type-container on the page) — see the 04 debug capture."
+        )
     await page.wait_for_timeout(400)
 
     # Confirm with the modal's "Add Case" button. The page's OTHER button reads
@@ -1404,6 +1526,14 @@ async def run_batch(page: Page, encounters):
 
         try:
             status = await fill_encounter(page, encounter)
+        except AlreadyInProgress as e:
+            # Their EMR state, not a failure of this run: don't count it as an error
+            # and don't let a cluster of them trip the circuit breaker.
+            print(f"  Skipped — {e}")
+            record("already-in-progress", str(e))
+            tally["skipped"] += 1
+            consecutive_errors = 0
+            continue
         except Exception as e:
             # Auto-continue rather than block on a dialog. Everything is a draft and now
             # audited, so an unattended batch should keep going, not freeze for hours on
@@ -1435,7 +1565,8 @@ async def run_batch(page: Page, encounters):
     # ── SUMMARY ────────────────────────────────
     print("\n── Batch complete ──")
     print(f"  saved:   {tally.get('saved', 0)}")
-    print(f"  skipped: {tally.get('skipped', 0)}  (unmatched names / your skips)")
+    print(f"  skipped: {tally.get('skipped', 0)}  (unmatched names / already In Progress"
+          f" / your skips)")
     print(f"  errors:  {tally.get('error', 0)}")
     print(f"\n  Full audit log: {os.path.basename(ENCOUNTER_LOG_CSV)}")
     print(f"  Review it redacted with:  python {os.path.basename(__file__)} --audit")
@@ -1548,6 +1679,105 @@ async def run_capture_fields(employee_name):
             await context.close()
 
 
+async def run_capture_assessment(employee_name, assessment_label="Physical Assessment"):
+    """Open a fresh assessment case for one employee and capture its FIRST screen —
+    read-only, nothing saved.
+
+    Same navigation as a coaching draft (locate employee -> + Add Case -> the "Select
+    Assessment Type" modal), but instead of the Coaching Encounter tile it clicks the
+    one whose text contains `assessment_label` (default "Physical Assessment"). The
+    scrubbed first-screen HTML lands in ./debug for field mapping.
+
+    We don't yet know the exact tile labels or the form's ready-signal, so this mode
+    MEASURES both rather than guessing: it prints the modal's tile labels (static UI
+    strings — safe) and the first screen's field labels, and snaps each step. No save
+    button is ever touched.
+    """
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            USER_DATA_DIR, headless=False, slow_mo=100)
+        page = context.pages[0] if context.pages else await context.new_page()
+        try:
+            await page.goto(BASE_URL)
+            await page.wait_for_load_state("networkidle")
+            popup("Log in / confirm the worksite if needed, then click OK to capture "
+                  f"the '{assessment_label}' first screen (nothing is saved).",
+                  title="EMR AutoMate — assessment capture")
+            await page.wait_for_load_state("networkidle")
+
+            full_name = employee_name.strip()
+            print(f"Locating {ph(full_name)}...")
+            rows = page.locator(".employee-list .details", has_text=full_name)
+            if await rows.count() == 0:
+                last = full_name.split(",")[0].strip()
+                box = page.locator("input[placeholder='Search Employee or Identifier']")
+                await box.click()
+                await box.fill(last)
+                await page.wait_for_timeout(1200)
+                rows = page.locator(".employee-list .details", has_text=full_name)
+            if await rows.count() == 0:
+                print(f"Couldn't find '{ph(full_name)}'. Try a different name.")
+                return
+            await rows.first.scroll_into_view_if_needed()
+            await rows.first.click()
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(2500)
+
+            # + Add Case -> "Select Assessment Type" modal
+            btn = page.locator("button:has-text('+ Add Case')")
+            await btn.wait_for(state="visible", timeout=20000)
+            try:
+                await btn.click(timeout=8000)
+            except Exception:
+                await btn.click(force=True)
+            await page.wait_for_timeout(800)
+            await snap(page, "ASSESS_00_add_case_modal")
+
+            # List every case-type tile so we KNOW the exact labels (open question in
+            # TODO.md) instead of guessing them. These are static UI strings.
+            tiles = page.locator(".assessment-type-container")
+            labels = [t.strip() for t in await tiles.all_inner_texts() if t.strip()]
+            print(f"Assessment-type tiles ({len(labels)}):")
+            for lbl in labels:
+                print(f"  - {lbl}")
+
+            tile = page.locator(".assessment-type-container", has_text=assessment_label)
+            if await tile.count() == 0:
+                print(f"\nNo tile matches '{assessment_label}'. Re-run with one of the "
+                      f"labels listed above, e.g.:\n"
+                      f'  python ati_coaching_encounter.py --capture-assessment '
+                      f'"Last, First" "<label>"')
+                return
+            await tile.first.click()
+            await page.wait_for_timeout(400)
+            await page.get_by_role("button", name="Add Case", exact=True).click()
+            await page.wait_for_load_state("networkidle")
+            # We don't know this form's ready-signal, so settle on networkidle + a pause
+            # rather than waiting on a coaching-specific field that may not exist here.
+            await page.wait_for_timeout(2500)
+            print(f"'{assessment_label}' first screen opened.")
+            await snap(page, "ASSESS_01_step1_form")
+
+            # Field labels on the first screen — static UI, safe to print, and the
+            # starting point for mapping the form.
+            field_labels = [t.strip()
+                            for t in await page.locator("form label, .form-field label")
+                                                .all_inner_texts()
+                            if t.strip()]
+            if field_labels:
+                print(f"\nFirst-screen field labels ({len(field_labels)}):")
+                for lbl in field_labels:
+                    print(f"  - {lbl}")
+
+            print("\nCaptured the scrubbed first screen to ./debug (ASSESS_*.html). "
+                  "Nothing was saved.")
+            popup(f"Captured the '{assessment_label}' first screen to ./debug.\n\n"
+                  "Nothing was saved. Click OK to close.",
+                  title="EMR AutoMate — assessment capture done")
+        finally:
+            await context.close()
+
+
 def review_audit(last_run_only=True):
     """Print the encounter audit log. Names go through ph()/pd(), so on a captured
     stdout (an assistant, a pipe) they show as 'Employee #1' — Dane sees the real names
@@ -1605,5 +1835,18 @@ if __name__ == "__main__":
             print('Usage: python ati_coaching_encounter.py --capture-fields "Last, First"')
         else:
             asyncio.run(run_capture_fields(name))
+    elif "--capture-assessment" in sys.argv:
+        i = sys.argv.index("--capture-assessment")
+        name = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
+        # Optional 3rd arg: the tile label (default Physical Assessment). Only treat it
+        # as a label if it isn't another flag.
+        label = "Physical Assessment"
+        if len(sys.argv) > i + 2 and not sys.argv[i + 2].startswith("--"):
+            label = sys.argv[i + 2]
+        if not name:
+            print('Usage: python ati_coaching_encounter.py --capture-assessment '
+                  '"Last, First" ["Tile Label"]')
+        else:
+            asyncio.run(run_capture_assessment(name, label))
     else:
         asyncio.run(run())

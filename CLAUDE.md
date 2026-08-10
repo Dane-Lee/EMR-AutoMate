@@ -33,12 +33,28 @@ encounter_log.csv           pa_follow_ups.csv        employee_updates_log.csv
 assessments_todo.md         new_descriptions_todo.md date_of_hire_todo.csv
 new_descriptions_for_library.csv                     identifier_shortened.csv
 emr_not_in_roster.csv       roster_not_in_emr.csv    gender_review_needed.csv
-gender_review_needed.csv    roster_*.xlsx            *EMR_notes*
-"EMR Easy Enter Worksheets.xlsx"                     "Active Associates*.xlsx"
+roster.*.xlsx               *EMR_notes*              "Active Associates*.xlsx"
 ```
+
+`roster.*.xlsx` (a dot) is dated/labelled copies of the real roster — `roster.2026-07-01.xlsx`,
+`roster.bak.xlsx`. **`roster_template.xlsx` (an underscore) is NOT on this list**: it is the
+fake-data template, it is tracked in git on purpose, and `.gitignore` carves it out of the
+same rule. Read it freely.
 
 A request to "just look at the CSV to see what's wrong" is exactly the request to
 refuse. Use the safe alternatives below — they were built for this.
+
+### `EMR Easy Enter Worksheets.xlsx` is NOT on that list (Dane, 2026-07-31)
+
+It was, until Dane cleared it: *"There isn't any PHI or even ATI data in that. It's my
+own file that I made."* It holds his **reusable description templates** — the library the
+builder reads — not encounter records. A template is written to be used for many people,
+so by construction it is about no one.
+
+Read it when the work needs it. What it must **never** become is a place PHI leaks into:
+if a tab ever starts holding per-employee text, it goes back on the list that day. The
+encounter-level description files (`new_descriptions_for_library.csv`, `encounters.csv`)
+are still off limits — those are about specific people.
 
 **Use fake names in code, docs, and tests:** `"Smith, Jane"`, `"Doe, John"`.
 See `encounters_template.csv` / `roster_template.xlsx`.

@@ -6,6 +6,224 @@ what decisions we made, and where we left off. See `TODO.md` for the forward lis
 
 ---
 
+## Session 17 — 2026-07-31 (new worksheet synced; hints activated; "Shift Board" redesign)
+
+Three items from Dane, gated one at a time. The workbook was also **cleared as non-PHI**
+by Dane this session — see the new note in `CLAUDE.md`; it's his own template file.
+
+### 1. New Easy Enter workbook synced — and the hints finally work
+Dane replaced the workbook (47 → 64 description cells, +18 added, 1 removed, 2 rewritten;
+diffed structurally by hashing each cell, so it was reviewable before the PHI question was
+settled). `DESCRIPTION_MIN_CHARS = 60` re-measured on the new file and still clean:
+longest short cell 54, shortest description 62.
+
+He then added `Choose …` hints across every tab — and **only 1 of 64 reached the builder.**
+Cause, found by mapping the row SHAPE of each tab (structure only, no text): the workbook
+has two conventions. NHO Encounters puts the hint on the same row as its description, which
+is what `load_library()` expected; **every other tab puts it on the row BELOW**, and those
+were read and thrown away. Three NHO hints were also ≥60 chars, so the length test caught
+them first and filed them as pickable *descriptions* — instruction text posing as
+documentation, the 77-records bug in a new place.
+
+Fixed in `load_library()`: a `Choose` cell is a hint at any length; a hint row carrying no
+description of its own attaches to the description row above it; same-row hints still win.
+One hint row after a multi-description row applies to all of them (Dane's call — they're
+variations of one scenario). Result: **61 real entries, 42 with working hints, up from 1.**
+
+### 2. "Shift Board" — the UI redesign (Dane picked it from two directions)
+Two directions were pitched as a published mockup rather than hex values in a terminal.
+Dane picked **Shift Board**: slate ground `#14181D`, safety amber `#F0A32B` on every active
+state, hi-vis `#9DBE3B` reserved for the batch tally alone, **Bahnschrift** (Windows' DIN
+face — machine-panel lettering) for legends, Consolas for counts. Font availability was
+checked against the real installed list, not assumed, and `_set_fonts()` re-resolves it at
+startup because Tk substitutes silently.
+
+**The roster list is now a `tk.Text`, not a `Listbox`** — that's what made the shift rail
+possible. A Listbox allows exactly one foreground per row, so a coloured bar that differs
+from the name beside it cannot exist there. Nothing was lost: the Listbox was created
+`selectmode=EXTENDED`, but `_on_click` returned `"break"`, pre-empting the class binding
+that sets a selection — so mouse selection never existed and `curselection()` was always
+empty. Click-to-toggle is unchanged; keyboard access is now real (focus row, Up/Down/PgUp/
+PgDn, Return/Space) instead of nominal.
+
+Two deliberate departures from the approved mockup:
+- **The rail is not amber for 1st shift.** Amber already means active/selected, and one
+  colour cannot carry two meanings. Rail is blue/orchid/teal, none of them the accent.
+- **The checked wash spans the line including its newline** (the only way a Text background
+  reaches full width), which repaints everything under it — so the rail tag is re-applied
+  and raised above it. That's the regression most likely to break silently later, so the
+  smoke test asserts tag order explicitly.
+
+Measured, not guessed: the tracked legend `WHAT WAS THE ENCOUNTER? (APPLIES TO EVERYONE
+CHECKED)` renders 497px against a 431px panel, so the legend was cut to the short form.
+261 rows render in 3ms. **Also found: the roster tally line needs 448–670px in a 431px
+panel and has been clipping — pre-existing, not from this work.**
+
+### 3. Description variations — proposed, Dane applies them himself
+Picked `Target-Check Ins`, `General-Relate`, `Target-Add-Ons` on evidence: Check-Ins has
+3 byte-identical Team Lead rows out of 5 and is used daily; Relate's first three entries
+are one sentence reworded and it's a large share of real batches; Add-Ons is 16 entries
+sharing a single sentence frame. Variations rephrase only what the original documents —
+adding technique or findings to a template would be falsifying a record.
+
+Defects found and handed to Dane (he's editing the workbook himself): the 3 duplicate rows;
+`Target-Add-Ons` [7] missing "with" and duplicating [8]; `Target-JobCoaching` [1] is a
+fill-in-the-blank template that is **pickable** and could enter `______` into a record;
+`NHO-HMA's` [1] is a heading, not a description; `General-GroupClass` hints have an
+unbalanced quote so they tick nothing; `Protective Recommendations` [5] has a stray `”`;
+`General-Relate` [3] slips into first person ("my help").
+
+
+## Session 16 — 2026-07-29/30 (first big live batch: 52/62 saved; two entry bugs found and fixed)
+
+Dane built and ran a 62-row batch (the first real run since the builder rework). Result:
+**52 saved, 4 name-unmatched, 6 errors.** Audited via `--audit` + the scrubbed `debug/`
+captures; both error causes were found in the page HTML, not guessed. Dane has since
+**abandoned that batch** (drafts and all) — the fixes are what carry forward, not the data.
+
+### ✅ Live-confirmed: the "In Progress" modal dismissal works
+Session 15's `dismiss_in_progress_prompt()` was only verified offline. This run settles it:
+**58 `INPROGRESS_prompt` captures** and the batch still saved 52 in a row. It detects the
+real modal and clicks No without derailing. That TODO item is closed.
+
+### Bug 1 — "+ Add Case" is DISABLED for an employee who already has an In Progress case
+Rows 38/41/46/55 (all Group Class, purely by coincidence of position) failed with a bare
+`Locator.click: Timeout 30000ms exceeded`. Cause, read off the `03_employee_selected`
+capture taken *before* the click: `<button ... disabled="">+ Add Case</button>` plus an
+"In Progress" badge on the employee header. **4 of 4 failures had it; 52 of 52 successes
+had neither** (correlation rebuilt on this run's captures only — `debug/` filenames carry
+no date and accumulate across days, so an unfiltered sweep silently mixes in other runs).
+
+The old code made it worse rather than reporting it:
+- it waited for the button to be **visible**, and a disabled button is visible;
+- the 8s click timed out, and the fallback **force-clicked** it — `force=True` skips the
+  actionability checks and clicks a disabled button, doing nothing, silently;
+- so the modal never opened and the *tile* click below burned its full 30s default
+  waiting for markup that was never coming.
+
+Two minutes of the run spent producing four timeout notes that named neither cause nor fix.
+**Fix:** wait for *enabled* (8s grace), never force-click a disabled button, raise the new
+`AlreadyInProgress` — logged as its own `already-in-progress` status, counted as skipped
+not error, and excluded from the circuit breaker (it's the employee's EMR state, not a
+systemic failure). The tile click is now bounded at 10s with a message that says the modal
+never opened.
+
+### Bug 2 — an empty employee list was reported as a misspelled name
+Rows 9 and 36 failed with "Couldn't find employee … check the spelling and the
+'Last, First' format" — **but both names were fine**; the pre-flight had already matched
+them against the full roster. Their `02_employee_list` capture: **0 `.name` spans**, a
+19,770-byte skeleton of 10 placeholder `.details` rows, where a healthy capture in the same
+run had **938 names**. `roster_names()` waits 30s for a `.name` to attach, returns `[]`,
+and `find_matches` turns the empty list into "not found".
+
+This is exactly the distinction `preflight_names` already makes — *an empty roster is a
+LOAD failure, not 77 bad names* — that `locate_employee` was missing. It's the same class
+of bug as the 2026-07-16 preflight name-read, and it fails the same way: **it blames Dane's
+data for the automation's blind spot.**
+
+**Fix:** on an empty list, reload and re-match against the **unfiltered** roster (the
+surname search box is only a speed-up, and it is what emptied the list — which also means
+entry-time matching can no longer disagree with the pre-flight that already succeeded).
+Only if that also comes back empty does it raise, and then it says plainly that it's a
+page/render failure and **encounters.csv is fine, leave it alone**.
+
+### Note for next time
+Both bugs cost 30s each because both waits were Playwright's silent default. When a click
+can legitimately never succeed, bound it and say why — a 30s timeout that names neither the
+cause nor the fix is barely better than a hang.
+
+
+## Session 15 — 2026-07-22/24 (assessment capture mode; six builder fixes; EMR "In Progress" modal)
+
+### EMR change — new "In Progress" navigation modal, auto-dismissed (2026-07-24)
+The EMR tech team added a modal that pops on the dashboard whenever drafts exist —
+"There are active encounters that have been saved 'In Progress'. Would you like to
+navigate to the 'In Progress' case list?" (Yes / No) — and it blocks the next save. Since
+the batch is mid-draft, it fires **every row** after the first. Fix in
+`ati_coaching_encounter.py`: `dismiss_in_progress_prompt()` detects it on the LIVE DOM
+(regex `navigate to the|active encounters`) and clicks **No** (stay and keep drafting;
+Yes would derail the batch). Wired into `open_dashboard` (twice — on load and once the
+roster attaches) and defensively after employee-select. Non-fatal (never raises, returns
+fast when absent) and it `snap()`s the modal the first time so the real markup is on
+record. Modal strings registered with `phi_redact`. **Verified offline** against a local
+HTML replica with Playwright (`scratchpad/modal_test.py`): detects the prompt, clicks No,
+stays (doesn't navigate), returns False when absent. Live confirmation comes on Dane's
+next batch run — if the real markup differs, it degrades to today's behavior (stall) plus
+a captured `INPROGRESS_prompt.html` to refine the selector.
+
+
+
+### Assessment work — first step built, then paused for builder fixes
+Scoping decided with Dane: assessment data **source = the builder** (extend it, no CSV,
+no dictation), **first type = Physical Assessment**, **fill depth = decide after we see
+the form**. Built `--capture-assessment "Last, First" ["Tile Label"]` in
+`ati_coaching_encounter.py`: reuses the add-case navigation, **lists the modal's tile
+labels** (so we learn the exact labels from the page, not a guess) + the first-screen
+field labels, and snaps the scrubbed form to `./debug` (`ASSESS_*.html`). Nothing saved.
+**Not yet run by Dane** — paused when he moved to builder changes.
+
+### Six builder changes requested by Dane (items 1–6 of his list)
+Items 1–5 done and verified; 6 folded into 7 (below).
+- **(1) Role filter** — "Line Leads" / "Supervisors" checkboxes next to the Shift chips
+  in "Who did you see?". Measured the roster first (counts only): there is **no**
+  "Line Lead"/"Supervisor" *title* — leads are `Team Lead` (17) + `Training Lead` (1) =
+  18; supervisors are `Prod Sup` (8) + `Maint Sup` (1) = 9. So the filter matches those
+  real titles by word-prefix (`ROLE_FILTERS`), not Dane's label. Inclusion filter,
+  inactive until ticked; not persisted (momentary view). **If "Line Leads" should mean
+  something other than Team/Training Lead, adjust `ROLE_FILTERS`.**
+- **(2) Library auto-filters by coaching type** — opening the Library defaults its
+  category to the tab matching the chosen coaching type (`library_category_for`, token
+  overlap), with a "(matched to …)" note; falls back to "All categories".
+- **(3) Review batch is cards, not CSV text** — each group shows *N people · coaching
+  type*, a meta line (date/encounter/prompted/dept/shift/category), details, full
+  description, and **the actual names**, plus per-card Delete. `_group_summary` reads it
+  back off the rows (dept/shift shown as "per employee" when they vary).
+- **(4) Category dropdown shows all at once** — Library category combobox
+  `height = min(len(cats), 25)`.
+- **(5) Group Class description box visibility** — cause: in per-employee mode the
+  group-wide dept/div/shift block sat there as 5 *disabled* rows, and Group Class's 10
+  detail checkboxes pushed the description off a 700px-tall window. Fix: **hide** that
+  block when it doesn't apply (`grid_remove`), a description min-height floor, and
+  trimmed the two group-panel separators. **Verified by direct geometry measurement** at
+  a 700px window: description fully on-screen in all four mode×type combos (tightest,
+  group + Group Class, clears by 12px).
+- Verification note: the agent **cannot screenshot** the builder (the launched window is
+  on a window station the agent's PowerShell can't reach — `FindWindow` returns nothing).
+  So item 5 was proven by measuring widget geometry, and items 1–5 by a headless
+  construct-and-exercise probe (`scratchpad/ui_probe.py`, `UIPROBE_VERIFY=1`). The
+  *look* (item 6) genuinely can't be seen from here.
+
+### (6)+(7) Individuals mode — faster one-at-a-time entry (built 2026-07-23)
+Dane: batching groups works, but distinct one-at-a-time encounters are too slow; item 6
+(builder "looks outdated") **folded in** since this reshapes the layout. Design decided
+with Dane: rapid **"Add & Next"** card; per person, coaching + description + person all
+vary; descriptions are a library/free-type mix.
+
+Built a **`Groups | Individuals` mode switch** (segmented Toolbutton, top-left where the
+panel has vertical slack). Individual mode is a *lens over the same form*, not a second
+panel — lowest risk, reuses every widget:
+- Click a name → **loads** that one person (doesn't check); the location chooser + bulk
+  controls hide; the add button becomes **Add & Next** (also **Ctrl+Enter** — plain
+  Enter stays free for description newlines).
+- **Add & Next** stores the person as a **group of one** located to their own roster
+  dept/div/shift, then clears person/description/detail-ticks and **carries forward**
+  date · encounter type · prompted · category · coaching type. So Review / Write / the
+  automation are all unchanged — a single is just a 1-row group.
+- Picking a Library description now **auto-sets the coaching type** from its tab
+  (`coaching_type_for_tab`, the reverse of item 2) *only when the type is unset*, and
+  auto-ticks details from the "Choose…" hint — so a library-based single is ~person +
+  one pick.
+Shared `_encounter_fields` / `_make_row` back both add paths (no duplicated validation).
+
+**Verified headlessly** (`scratchpad/ui_probe.py individuals`, `geom_check.py`): a single
+produces exactly the CSV columns with per-employee location from the roster; carry-forward
+works; the mode toggles both ways without error; the description box is visible in both
+modes and item-5's group-mode geometry is unregressed. **Still can't screenshot the
+window** — Dane opened the real builder 2026-07-23 to enter that day's encounters and to
+eyeball the look; the visual (item 6) is his to confirm/redirect.
+
+---
+
 ## Session 14 — 2026-07-16 → 07-20 (Copilot intake removed → local Encounter Builder; UI overhaul; add-employee feature started)
 
 ### Copilot dictation intake RETIRED → `encounter_builder.py`

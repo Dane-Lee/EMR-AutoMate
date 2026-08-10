@@ -11,15 +11,97 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 > 261). Entry engine hardened (session guard + `--resume`). Full builder **UI overhaul**
 > (flat modern theme, work-area filter, card-based description library, `--demo` mode).
 > Three production bugs fixed (window size / preflight name-read / description-library
-> join — see `WORKLOG.md`). **IN PROGRESS: the add-employee feature** (below). After
-> that: physical & follow-up assessments. Full narrative in `WORKLOG.md`.
+> join — see `WORKLOG.md`). Add-employee is **SHELVED** (below). **First big live batch
+> ran 2026-07-29: 52/62 saved**, two entry bugs found and fixed 2026-07-30 (Session 16);
+> that batch was then abandoned. **NEXT: physical & follow-up assessments.** Full
+> narrative in `WORKLOG.md`. **2026-07-31:** new Easy Enter workbook synced, `Choose`
+> hints activated (42/61), and the UI redesigned as **"Shift Board"** (slate + safety
+> amber, Bahnschrift, shift rail). The workbook is **not PHI** — see `CLAUDE.md`.
 >
 > ⚠️ Sections further down that mention M365 Copilot, dictation, `TRANSCRIPTION_PROMPT.md`
 > or "pivot to mobile" are **historical** — superseded by the local builder above.
 
 ---
 
-## 🔨 IN PROGRESS — Physical Assessments & PA Follow-Ups (requested 2026-07-20)
+## ✅ DONE — EMR "In Progress" modal (fixed 2026-07-24, live-confirmed 2026-07-29)
+
+EMR tech added a modal that blocks every save: "…navigate to the 'In Progress' case
+list?" (Yes/No). `dismiss_in_progress_prompt()` in `ati_coaching_encounter.py` clicks
+**No** on it (wired into `open_dashboard` + after employee-select).
+- [x] **Confirmed on the 2026-07-29 batch:** 58 `INPROGRESS_prompt` captures and the run
+      still saved 52 encounters. Detects the real modal, clicks No, doesn't derail.
+
+## ✅ DONE 2026-07-31 — new worksheet synced, hints live, UI redesigned
+
+Full narrative in `WORKLOG.md` Session 17.
+- [x] **New Easy Enter workbook synced.** 61 entries; `DESCRIPTION_MIN_CHARS = 60`
+      re-measured and still clean (54 / 62).
+- [x] **`Choose` hints now reach the builder** — 42 of 61, up from 1. They sit on the row
+      *below* their description in every tab except NHO Encounters; `load_library()` now
+      handles both conventions, and a `Choose` cell is a hint at any length.
+- [x] **"Shift Board" UI shipped** — slate + safety amber, Bahnschrift legends, and the
+      shift rail. Roster list swapped `Listbox` → `Text` (a Listbox can't colour the rail
+      separately from the name). 20/20 smoke checks; 261 rows in 3ms.
+- [x] **`CLAUDE.md` corrected:** the Easy Enter workbook is **not** PHI (Dane, 2026-07-31)
+      and is no longer on the never-read list.
+- [ ] **Dane: apply the description edits** — variations for `Target-Check Ins`,
+      `General-Relate`, `Target-Add-Ons`, plus 7 defects (3 duplicate rows; a pickable
+      fill-in-the-blank template in `Target-JobCoaching` [1]; a heading in `NHO-HMA's` [1];
+      an unbalanced quote in both `General-GroupClass` hints; a stray `”`; a first-person
+      slip). List is in the 2026-07-31 chat; ask and I'll write it to a file.
+- [ ] **Roster tally line clips** — needs 448–670px in a 431px panel. Pre-existing, found
+      while measuring the redesign. Shorten the string or let it wrap.
+- [ ] **19 descriptions still have no hint** — they're in the five tabs that have no hint
+      rows at all (`Protective Recommendations`, `FocusNextEnc`, `NHO-HMA's`, `HMA's`,
+      `CoachingDetailsCorrectiveAction`). Dane's to add if he wants them.
+- [ ] **Shift rail shows only two colours today** — the roster is 155 on 1st and 106 on
+      2nd, with no 3rd shift and no blanks. The teal/grey rails are wired and tested but
+      currently colour nobody.
+
+## ✅ FIXED 2026-07-30 — two entry bugs from the 2026-07-29 batch (52/62 saved)
+
+Both found in the scrubbed `debug/` captures, both fixed in `ati_coaching_encounter.py`.
+Full detail in `WORKLOG.md` Session 16.
+- [x] **"+ Add Case" is disabled when the employee already has an In Progress case.**
+      The old force-click fallback clicked a disabled button (a no-op), so the tile click
+      then burned 30s on a modal that never opened. Now waits for *enabled* and raises
+      `AlreadyInProgress` → logged as `already-in-progress`, counted as skipped, excluded
+      from the circuit breaker.
+- [x] **An empty employee list was reported as a misspelled name.** The list came back as
+      a loading skeleton (0 names vs 938); `roster_names()` returned `[]` and that became
+      "couldn't find employee" for two names the pre-flight had already matched. Now
+      reloads and matches against the unfiltered roster, and says "page didn't load,
+      encounters.csv is fine" only if that fails too.
+- [ ] **Watch on the next batch:** if `already-in-progress` rows show up, that's Dane's
+      own leftover drafts — clear them in the EMR first, or accept the skips.
+- [ ] Worth doing sometime: `debug/` filenames are `HHMMSS` with **no date**, so captures
+      from different days interleave and any sweep across them has to filter by mtime.
+      Datestamp the filenames (or subfolder per run) to remove the trap.
+
+## 🔨 ACTIVE — Builder: individual-entry mode built; needs Dane's visual eyeball (items 6+7)
+
+Built 2026-07-23. A **`Groups | Individuals` mode switch**: individual mode loads one
+person on click, **Add & Next** (Ctrl+Enter) stores them as a group of one and carries
+date/type/prompted/category/coaching forward, and a Library pick auto-sets the coaching
+type. Verified headlessly (rows/geometry/carry-forward); **the look is unverified — the
+agent can't screenshot the window.**
+- [ ] **Dane: open `python encounter_builder.py --demo`, confirm the layout/look of both
+      modes** (item 6 lives here). Redirect if the "outdated" feel isn't fixed — e.g.
+      palette, spacing, the segmented toggle, the individual card.
+- [ ] Nice-to-haves if wanted: per-person coaching *not* carried forward; a different
+      Add-&-Next hotkey; individual mode without reusing the roster list.
+
+### Builder fixes shipped (Dane's items 1–5, verified — see WORKLOG Session 15)
+- [x] **(1)** Role filter "Line Leads"/"Supervisors" (matches `Team Lead`/`Training Lead`
+      and `Prod Sup`/`Maint Sup`; see `ROLE_FILTERS` — adjust if the meaning differs).
+- [x] **(2)** Library auto-defaults its category to the chosen coaching type.
+- [x] **(3)** Review batch is informative cards (who + what), per-card delete.
+- [x] **(4)** Library category dropdown shows every category at once.
+- [x] **(5)** Group Class description box stays on-screen (verified by geometry).
+- [ ] **Live GUI confirm**: agent can't screenshot the window; Dane should open
+      `python encounter_builder.py --demo` once and sanity-check 1–5 look right.
+
+## ⏸ PAUSED (behind the builder work) — Physical Assessments & PA Follow-Ups (requested 2026-07-20)
 
 A **separate EMR case type** — the current tool only enters Coaching Encounters. The
 "Select Assessment Type" modal has ~8 `assessment-type-container` tiles; Coaching
@@ -32,12 +114,18 @@ AutoMate picks the assessment tile, fills the shared first ("Encounter Details")
 and Saves in progress; Dane finishes the assessment-specific screens by hand. Revisit vs
 fuller automation once we see the forms.
 
-- [ ] **Scope (asking Dane):** exact tile labels for Physical Assessment + PA Follow-Up;
-      the **source** of the data (a CSV like `pa_follow_ups.csv`? the builder? dictation?);
-      how much AutoMate should fill (first screen only vs more); how PA vs Follow-Up differ.
-- [ ] **Capture the forms:** build a capture mode (reuse the add-case navigation) that
-      clicks the assessment tile and snaps the form(s), scrubbed, like `--capture-fields`.
-- [ ] **Map fields** against the captured forms.
+- [~] **Scope (Dane decided 2026-07-22):** data **source = the builder**
+      (`encounter_builder.py`, extended to emit assessment rows — no CSV, no dictation);
+      **fill depth = decide after we see the form**; **first type = Physical Assessment**
+      (PA Follow-Up comes after). Exact tile labels still unknown — the capture mode
+      below now lists them from the modal rather than guessing.
+- [~] **Capture the form:** built `--capture-assessment "Last, First" ["Tile Label"]`
+      in `ati_coaching_encounter.py` — reuses the add-case navigation, prints the
+      modal's tile labels + the first-screen field labels, and snaps the scrubbed form
+      to `./debug` (`ASSESS_*.html`). Nothing saved. **Next: Dane runs it on one
+      employee; then I read the debug HTML and map fields.**
+- [ ] **Map fields** against the captured Physical Assessment first screen, then decide
+      fill depth (first screen only vs more).
 - [ ] **Wire + prove on ONE draft** before any batch.
 - [ ] Parked/related: HMA-score double-entry (PLAN.md B-future) is a bigger, separate build.
 
