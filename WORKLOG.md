@@ -6,6 +6,81 @@ what decisions we made, and where we left off. See `TODO.md` for the forward lis
 
 ---
 
+## Session 18 — 2026-08-10 (a duplicate draft, and the guard that should have stopped it)
+
+Started as "commit the backlog", turned into an incident.
+
+### What happened
+Two duplicate drafts went into the EMR this morning. `encounters.csv` still held the
+36-row batch from 2026-07-31 — already 34 of 36 entered — and a plain run entered it
+again from row 1. Rows 1 and 2 saved a second time; rows 3–7 errored with `Target page,
+context or browser has been closed` (the browser was closed mid-run), and five
+consecutive errors tripped the circuit breaker. Dane deleted the two duplicates.
+
+The audit log contained every fact needed to prevent it. Nothing consulted it. That is
+the actual finding — not the stale file, which is just Tuesday.
+
+### The two holes
+**Nothing asked whether a row had already been entered.** Every pre-flight check asked
+whether a row *can* be entered — name resolves, dropdowns valid, roster loaded. None
+asked whether it already *had* been. `prepare_batch()` now keys the batch against
+`encounter_log.csv`: a wholly-entered batch refuses outright and cannot be forced
+through the dialog, and a partial overlap offers to drop only the entered rows.
+
+**`--resume` read one run.** It scoped its saved-set to `max(run_started)`. Resuming
+this morning's file would have dropped that run's 2 saves and handed back 34 rows —
+32 of them already in the EMR — which is a worse outcome than not resuming at all. It
+now drops rows saved by any run and reports how many came from an earlier one, so a
+stale batch is distinguishable from a stalled one.
+
+Keys are stripped on both sides. `log_encounter()` strips the name before writing and
+the CSV may not have; a mismatch there misses silently, which is the failure mode that
+matters. Same person/date/type counts as already-entered — a genuine same-day repeat
+costs one dialog, the opposite default duplicates a record with no dialog at all.
+
+### `test_dedup.py` — the repo's first committed test
+12 tests, fake data, fixtures in a temp dir with the module's file constants repointed
+so it cannot touch the real batch or log. The load-bearing one reproduces this morning
+exactly: a batch part-entered on one day, re-run on another.
+
+### Found while fixing it
+- **A redirected run crashed on its own warnings.** This file prints non-ASCII in 119
+  places; a redirected stdout on Windows is cp1252, which encodes none of them. So
+  `Run-Encounters.ps1 > log.txt` died on the first `⚠` — and a redirect is exactly when
+  `phi_redact` arms, so the crash was reserved for the runs meant to be captured and
+  reviewed. Both streams forced to UTF-8.
+- **`roster_template.xlsx` held two real employees.** Caught before `git add`. It had
+  never been committed, and `.gitignore` was never protecting it — the underscore
+  carve-out that exempts it from `roster.*.xlsx` is precisely what makes that filename
+  commitable. The safety mechanism and the exposure were the same line. Real rows moved
+  to `roster.nicknametest.xlsx`; template rewritten with placeholders.
+- **CLAUDE.md's `mobile_import.py` warning was a commit out of date** — the raw-name
+  printing was fixed in `31b3d8d`. The doc had it as an open prerequisite.
+
+### Also shipped
+`mobile_import.py` backs up `encounters.csv` before overwriting (it destroyed the
+unsaved remainder of a batch, and the audit log only knows what saved) and drops
+already-entered captures, importing both the saved-set and the key normalisation from
+the entry engine rather than keeping a second copy to drift.
+
+The roster tally had been clipping since before the Shift Board redesign: 494–758px in
+a 430px column, so the totals were never visible. Split to two lines — 345/350px worst
+case — with all three counts kept, because `shown` is filtered by the search box and
+role filters too and is not derivable from `filtered_out`. `ROSTER_PANEL_PX` now ties
+the tally to the grid minsize; nothing had connected them, which is how a layout drifts
+out of its container unnoticed.
+
+`debug/` filenames are datestamped. The trap sprang during this session's diagnosis: a
+09:56 capture sat directly beside a 16:11 one from eleven days earlier.
+
+### Where we left off
+`--capture-assessment` has still never run — no `ASSESS_*` file exists anywhere, and
+`run_capture_assessment()` snaps one as its first action. Physical Assessment mapping
+is blocked on it. `encounters.csv` was cleared at Dane's request (36 rows preserved in
+`encounters.bak.csv`), so the next batch starts from the builder.
+
+---
+
 ## Session 17 — 2026-07-31 (new worksheet synced; hints activated; "Shift Board" redesign)
 
 Three items from Dane, gated one at a time. The workbook was also **cleared as non-PHI**
