@@ -41,6 +41,17 @@ roster.*.xlsx               *EMR_notes*              "Active Associates*.xlsx"
 fake-data template, it is tracked in git on purpose, and `.gitignore` carves it out of the
 same rule. Read it freely.
 
+⚠️ **But the name is not the guarantee — the contents are.** On 2026-08-10 the working copy
+of `roster_template.xlsx` held two *real* employees; Dane confirmed it. It had never been
+committed, and `.gitignore` would not have stopped it, because the underscore carve-out is
+exactly what makes this filename commitable. The real rows were moved to
+`roster.nicknametest.xlsx` (caught by the dot rule) and the template rewritten with
+`Smith, Jane` / `Doe, John` / `Roe, Richard`.
+
+So: **open it and look at every row before you `git add` it.** If a row isn't one of the
+documented placeholders, stop and ask — a template filename is a claim about intent, not a
+fact about content, and this is the one file where a wrong guess commits PHI.
+
 A request to "just look at the CSV to see what's wrong" is exactly the request to
 refuse. Use the safe alternatives below — they were built for this.
 
