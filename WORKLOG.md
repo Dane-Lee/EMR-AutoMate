@@ -73,10 +73,35 @@ out of its container unnoticed.
 `debug/` filenames are datestamped. The trap sprang during this session's diagnosis: a
 09:56 capture sat directly beside a 16:11 one from eleven days earlier.
 
+### The assessment capture (late in the session)
+Dane ran `--capture-assessment` at 11:52 — the first captures to land under the new
+datestamped naming. Result, from diffing the scrubbed HTML both directions:
+
+**The assessment first screen is identical to the coaching first screen.** Same 15
+controls, same five labels, same `encounteredType` radios, same `react-select-3..6` /
+`Category1..3` / `shiftDetails`, same `.save-btn` and `.next-btn`. Nothing is unique to
+either. That is the parity PLAN.md said to *verify* before building Gap B rather than
+assume — it holds, so the existing step-1 fill needs no assessment-specific work at all.
+Gap B's "start + first screen only" is close to free.
+
+One thing the capture could not answer: the tile labels came back `[redacted:15]`,
+`[redacted:19]`, `[redacted:25]`. `phi_redact`'s allowlist carried "Assessment" and
+"Assessment Type" but none of the individual case types, so **the capture scrubbed out
+the single fact it existed to learn.** Worth remembering as a class of bug: an
+allowlist-based scrubber silently defeats any capture whose subject is a string the
+allowlist has never heard of, and it looks like a successful capture.
+
+Widened the allowlist with the case types. Safe in a way most guessing here is not — an
+allowlist entry only permits an EXACT match, so a label that isn't real matches no text
+and reveals nothing. Guessing a value to *display* is inert when wrong; guessing one to
+*type into a form* wrote a UI hint into 77 records. Opposite failure modes, and worth
+keeping straight before treating "don't guess" as a blanket rule.
+
 ### Where we left off
-`--capture-assessment` has still never run — no `ASSESS_*` file exists anywhere, and
-`run_capture_assessment()` snaps one as its first action. Physical Assessment mapping
-is blocked on it. `encounters.csv` was cleared at Dane's request (36 rows preserved in
+Assessment wiring is one string away: the exact tile label. It prints to Dane's terminal
+on every capture run, and a re-run now shows it in the HTML too.
+
+`encounters.csv` was cleared at Dane's request (36 rows preserved in
 `encounters.bak.csv`), so the next batch starts from the builder.
 
 ---
