@@ -447,6 +447,13 @@ class EncounterBuilder(tk.Tk):
         # encounter, "Add & Next" — for a day of distinct one-at-a-time encounters. An
         # individual is stored as a group of one, so everything downstream is unchanged.
         self.mode = tk.StringVar(value="groups")
+        # Shift Pool mode: roll-call first, sort second. You check off everyone you saw
+        # on a shift, then work through that much smaller list assigning coaching types,
+        # instead of hunting 261 names again for every type. A person LEAVES the pool
+        # when assigned — a second encounter the same day is rare enough that Dane would
+        # rather re-select than have every assigned name linger.
+        self.pool = []            # [name] still waiting to be assigned
+        self.pool_shift = ""      # which shift the roll call was taken for
 
         # Row 0 (the panels) takes every spare pixel; row 1 (the batch bar) keeps its
         # own height no matter how small the window gets, so the buttons that finish
@@ -702,6 +709,9 @@ class EncounterBuilder(tk.Tk):
         ttk.Radiobutton(mode_bar, text="Groups", value="groups", variable=self.mode,
                         style="Toolbutton", command=self._on_mode).pack(side="left")
         ttk.Radiobutton(mode_bar, text="Individuals", value="individuals",
+                        variable=self.mode, style="Toolbutton",
+                        command=self._on_mode).pack(side="left", padx=(2, 0))
+        ttk.Radiobutton(mode_bar, text="Shift Pool", value="pool",
                         variable=self.mode, style="Toolbutton",
                         command=self._on_mode).pack(side="left", padx=(2, 0))
         self.mode_hint = ttk.Label(mode_bar, text="", foreground=UI_MUTED)
@@ -1832,8 +1842,31 @@ class EncounterBuilder(tk.Tk):
         self.find_entry.focus_set()
 
     def _on_mode(self):
-        """Switch the panels between group entry and one-at-a-time individual entry."""
-        individuals = self.mode.get() == "individuals"
+        """Switch the panels between the entry modes."""
+        mode = self.mode.get()
+        if mode == "pool":
+            # Roll call first: the roster panel keeps its bulk-check controls (you are
+            # checking many people), but the encounter form is for the SUBSET you pick
+            # out of the pool, not for everyone checked.
+            for w in self._roster_group_only:
+                w.grid()
+            self.loc_mode.set("per_employee")
+            self._on_loc_mode()
+            for w in self._loc_section_widgets:
+                w.grid_remove()
+            self.add_btn.config(text="Add checked to pool →", command=self._fill_pool)
+            self.group_frame.config(text="Shift Pool  ·  sort the people you saw")
+            self.mode_hint.config(text="check who you saw → sort them by type")
+            self.roster_hint.config(
+                text="Check everyone you had an encounter with this shift, then "
+                     "'Add checked to pool'. Sort them into coaching types from the "
+                     "pool window — each one leaves the pool as you assign it.")
+            self._refresh_list()
+            self._update_count()
+            self._show_pool_window()
+            return
+
+        individuals = mode == "individuals"
         if individuals:
             # A single is always located to that person's own roster record — force
             # per-employee and hide the location chooser and the bulk-check controls.
@@ -1863,6 +1896,199 @@ class EncounterBuilder(tk.Tk):
                 text="Click a name to check it (checked = green). 'checked only' "
                      "reviews your pick. Hidden areas/shifts are remembered between runs.")
         self._refresh_list()
+        self._update_count()
+
+    # ── Shift Pool ────────────────────────────
+    # Roll call, then sort. The old flow made you find each person in a 261-name list
+    # once per coaching type, because the roster cleared after every group. Here you
+    # find everyone once, then work a short list down to nothing.
+
+    def _fill_pool(self):
+        """Move everyone currently checked into the pool."""
+        if not self.checked:
+            messagebox.showwarning(
+                "No one checked",
+                "Check the people you had an encounter with this shift, then add them "
+                "to the pool.")
+            return
+        added = [n for n in sorted(self.checked, key=str.lower) if n not in self.pool]
+        self.pool.extend(added)
+        # Remember the shift if the roll call was taken with a single shift showing —
+        # it is only a label, so a mixed selection just leaves it blank rather than
+        # claiming a shift that isn't true of everyone.
+        shifts = {self.by_name[n]["shift"] for n in self.pool if n in self.by_name}
+        self.pool_shift = next(iter(shifts)) if len(shifts) == 1 else ""
+        self.checked.clear()
+        self._refresh_list()
+        self._update_count()
+        self._show_pool_window()
+
+    def _show_pool_window(self):
+        """Open (or re-focus) the sorting window."""
+        existing = getattr(self, "pool_win", None)
+        if existing is not None and existing.winfo_exists():
+            self._refresh_pool_list()
+            existing.deiconify()
+            existing.lift()
+            return
+
+        win = tk.Toplevel(self)
+        self.pool_win = win
+        win.title("Shift Pool — sort by coaching type")
+        win.configure(bg=UI_BG)
+        win.protocol("WM_DELETE_WINDOW", win.withdraw)   # hide, never lose the pool
+
+        self.pool_head = tk.Label(win, text="", bg=UI_BG, fg=UI_TEXT,
+                                  font=("Segoe UI", 13, "bold"))
+        self.pool_head.pack(anchor="w", padx=14, pady=(12, 0))
+        tk.Label(win, text="Select the people who had the SAME encounter, choose the "
+                           "type, then Assign. They leave the pool.",
+                 bg=UI_BG, fg=UI_MUTED, wraplength=460,
+                 justify="left").pack(anchor="w", padx=14, pady=(2, 6))
+
+        self.pool_list = tk.Listbox(win, selectmode="extended", height=16, width=46,
+                                    bg=UI_CARD, fg=UI_TEXT, highlightthickness=0,
+                                    selectbackground=CHECK_FG, activestyle="none",
+                                    font=("Segoe UI", 11))
+        self.pool_list.pack(fill="both", expand=True, padx=14, pady=(0, 6))
+
+        picker = ttk.Frame(win)
+        picker.pack(fill="x", padx=14)
+        ttk.Label(picker, text="Coaching type:").pack(side="left", padx=(0, 6))
+        self.pool_type = tk.StringVar(value=PICK_ONE)
+        # Same list the main form's radios use, so the two can never disagree about
+        # what a valid coaching type is.
+        ttk.Combobox(picker, textvariable=self.pool_type, state="readonly", width=34,
+                     values=[PICK_ONE] + list(COACHING_TYPES)).pack(side="left")
+
+        sel = ttk.Frame(win)
+        sel.pack(fill="x", padx=14, pady=(6, 0))
+        ttk.Button(sel, text="Select all", width=10,
+                   command=lambda: self.pool_list.select_set(0, tk.END)).pack(side="left")
+        ttk.Button(sel, text="Clear", width=8,
+                   command=lambda: self.pool_list.selection_clear(0, tk.END)
+                   ).pack(side="left", padx=4)
+        self.pool_sel_lbl = tk.Label(sel, text="", bg=UI_BG, fg=CHECK_FG,
+                                     font=("Segoe UI", 10, "bold"))
+        self.pool_sel_lbl.pack(side="left", padx=8)
+        self.pool_list.bind("<<ListboxSelect>>", lambda e: self._update_pool_sel())
+
+        foot = ttk.Frame(win)
+        foot.pack(fill="x", padx=14, pady=(8, 12))
+        ttk.Button(foot, text="Assign selected →", style="Accent.TButton",
+                   command=self._assign_from_pool).pack(side="left")
+        ttk.Button(foot, text="Put back on roster",
+                   command=self._return_to_roster).pack(side="left", padx=6)
+        ttk.Button(foot, text="Close", command=win.withdraw).pack(side="right")
+
+        self._refresh_pool_list()
+        win.update_idletasks()
+        win.geometry(f"+{self.winfo_rootx() + 250}+{self.winfo_rooty() + 90}")
+
+    def _refresh_pool_list(self):
+        if not getattr(self, "pool_win", None) or not self.pool_win.winfo_exists():
+            return
+        self.pool_list.delete(0, tk.END)
+        for name in self.pool:
+            p = self.by_name.get(name, {})
+            extra = " · ".join(x for x in (p.get("dept", ""), p.get("shift", "")) if x)
+            self.pool_list.insert(tk.END, f"{name}    {extra}")
+        shift = f"{self.pool_shift} shift  ·  " if self.pool_shift else ""
+        self.pool_head.config(
+            text=f"{shift}{len(self.pool)} still to sort"
+                 if self.pool else "Pool empty — everyone is accounted for")
+        self._update_pool_sel()
+
+    def _update_pool_sel(self):
+        if getattr(self, "pool_sel_lbl", None):
+            n = len(self.pool_list.curselection())
+            self.pool_sel_lbl.config(text=f"{n} selected" if n else "")
+
+    def _pool_picks(self):
+        return [self.pool[i] for i in self.pool_list.curselection()]
+
+    def _assign_from_pool(self):
+        """Assign the selected people one shared encounter, then drop them from the pool."""
+        picks = self._pool_picks()
+        if not picks:
+            messagebox.showwarning("Nobody selected",
+                                   "Select the people who had the same encounter.",
+                                   parent=self.pool_win)
+            return
+        if self.pool_type.get() == PICK_ONE:
+            messagebox.showwarning(
+                "Coaching type",
+                "Pick the coaching type for these people.\n\nIt is the clinical "
+                "classification of the encounter and this tool will not guess it.",
+                parent=self.pool_win)
+            return
+
+        # Drive the main form so validation, the description box and the detail ticks
+        # behave exactly as they do everywhere else — one definition of a valid
+        # encounter, not a second one living in this window.
+        self.type_var.set(self.pool_type.get())
+        self._on_type_change()
+        self.pool_win.withdraw()
+        messagebox.showinfo(
+            "Finish this encounter",
+            f"{len(picks)} " + ("person" if len(picks) == 1 else "people")
+            + f" · {self.pool_type.get()}\n\n"
+              "Fill in the description and any detail boxes in the main window, then "
+              "press “Assign group”.")
+
+        self.checked = set(picks)
+        self._pending_pool = picks
+        self.add_btn.config(text=f"Assign group ({len(picks)})",
+                            command=self._commit_pool_group)
+        self._refresh_list()
+        self._update_count()
+        self.desc_text.focus_set()
+
+    def _commit_pool_group(self):
+        """Second half of an assignment: the form is filled, make the group."""
+        picks = getattr(self, "_pending_pool", None)
+        if not picks:
+            return self._fill_pool()
+        fields = self._encounter_fields()
+        if not fields:
+            return
+        raw_date, details, description = fields
+        rows = [self._make_row(n, raw_date, details, description, per_employee=True)
+                for n in picks]
+        self.groups.append({
+            "rows": rows,
+            "label": (f"{len(rows):>3} people  ·  {self.type_var.get()}"
+                      f"{'  ·  ' + details if details else ''}"
+                      f"  ·  {raw_date or 'today'}  ·  from shift pool"),
+        })
+        for n in picks:
+            if n in self.pool:
+                self.pool.remove(n)
+        self._pending_pool = None
+        self.checked.clear()
+        self.desc_text.delete("1.0", tk.END)
+        for v in self.detail_vars.values():
+            v.set(False)
+        self.add_btn.config(text="Add checked to pool →", command=self._fill_pool)
+        self._refresh_list()
+        self._update_count()
+        self._update_batch()
+        self._show_pool_window()
+        if not self.pool:
+            messagebox.showinfo(
+                "Pool cleared",
+                "Everyone from that roll call is accounted for.\n\n"
+                "Check more names on the roster to start another pool, or write the "
+                "batch.", parent=self.pool_win)
+
+    def _return_to_roster(self):
+        """Take people back out of the pool without assigning them anything."""
+        picks = self._pool_picks()
+        if not picks:
+            return
+        for n in picks:
+            self.pool.remove(n)
+        self._refresh_pool_list()
         self._update_count()
 
     @property
