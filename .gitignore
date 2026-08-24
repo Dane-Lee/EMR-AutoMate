@@ -7,6 +7,19 @@ debug/
 encounters.csv
 # Parked PA Follow-Up assessments (PHI) — tool can't draft these yet
 pa_follow_ups.csv
+
+# Dated PA / follow-up write-ups (2026-08-24). Holds no names by design, but it is a
+# log of real encounters on real dates — it never goes in git.
+pa_writeups.md
+
+# Dane's de-identified encounter batch (2026-08-24). Names stripped, but it is still a
+# list of real encounters — see ENCOUNTER_INTAKE.md. Never committed.
+encounter_intake.xlsx
+encounter_intake.*.xlsx
+
+# Dane's working intake template. Blank when supplied 2026-08-24, but it is the file he
+# fills with real encounters — the roster_template.xlsx trap. Never committed.
+Encounter Intake Template.xlsx
 # Working input with the real employee roster (PII) — template is safe to commit
 roster.xlsx
 # Audit log of employee updates (old->new employee PII)

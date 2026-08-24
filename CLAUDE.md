@@ -135,7 +135,25 @@ python encounter_builder.py                     # build encounters.csv from the 
 python ati_coaching_encounter.py --audit        # what the last run did (redacted)
 python ati_coaching_encounter.py --resume       # drop rows the last run already saved
 python emr_automate.py                          # menu: Build / Enter / Update Roster
+
+python update_employees.py --from-hc <xlsx>     # HC export -> roster.xlsx (no browser)
+python update_employees.py --report             # READ-ONLY roster<->EMR reconciliation
+python update_employees.py --capture-sites      # READ-ONLY: which worksite? how many?
+python update_employees.py                      # push roster.xlsx into the EMR
 ```
+
+`--report` opens the browser but only reads: it writes `emr_not_in_roster.csv` (who is
+in the EMR with no active-roster row — the deactivate-these worklist, with anyone
+already inactive flagged and sorted to the bottom) and `roster_not_in_emr.csv` (new
+hires to add by hand). A full run writes both **before** the confirmation popup, so
+cancelling still leaves the worklists behind.
+
+**Open question (2026-08-19): is the dashboard roster one worksite or all of them?**
+Dane's EMR account contains employees from other ATI sites and he doesn't know how many.
+The header names a single location and there's a group switcher beside it, which *looks*
+site-scoped — but that is an inference, not a measurement. Until `--capture-sites`
+settles it, `emr_not_in_roster.csv` is a review list, **not** a deactivate list: an
+active employee at another site would appear on it looking exactly like a terminated one.
 
 The browser opens **visibly on Dane's screen** and pauses on Windows dialogs for login,
 worksite confirmation, and batch approval. You can't see that window and don't need to —
@@ -145,6 +163,110 @@ finalized without him.
 **A run that stops early** (expired session, circuit breaker) leaves the batch half
 entered. Use `--resume`, never a plain re-run: it drops only the rows the audit log
 confirms saved, so the rest can go in without drafting anyone twice.
+
+## Writing descriptions with Dane (added 2026-08-24)
+
+Assessments — physical, follow-up, task — **cannot be automated**. The entry engine only
+ever clicks the "Coaching Encounter" tile, so Dane hand-enters every assessment. The help
+that actually moves his backlog is **writing the description text**, which he pastes in.
+
+This does not bend the PHI boundary. He describes the *scenario* — injury, body part,
+mechanism, what he found, what he did. A **batch** version of the same exchange is
+specced in `ENCOUNTER_INTAKE.md`: a de-identified spreadsheet in, labeled blocks out,
+keyed by a `ref` column Dane maps back to people on his side. No names, no dates of birth, no badge or
+identifier numbers, no date tied to a person. On 2026-08-24 he asked, under a report
+deadline, to hand over the encounter file itself. That was declined; this is what replaced
+it. **A deadline is not a reason to take the file** — and saying so once is enough, since
+he already knows the rule and does not need it explained twice.
+
+### The voice
+
+Third person, `EIS` / `EE`, past tense, they/their — matching the workbook.
+
+**Plain language, not clinical.** Dane, 2026-08-24: *"tone down the medical jargon. I'm
+not a doctor and I'm not trying to sound like one. Think low level athletic trainer at
+best."* So "rolled their ankle inward", not "inversion mechanism"; "walking with a limp",
+not "antalgic gait"; "bruising", not "ecchymosis". The full translation table is in
+`pa_templates.md`.
+
+### Short. Shorter than feels finished
+
+Refined by Dane the same day: *"I don't mind multiple sentences. I think it was mostly the
+amount of detail you gave that made it too lengthy."* So the limit is **detail density,
+not sentence count** — say what happened and what was covered, then stop. Don't elaborate
+on why it matters, list every variation, or add a closing reassurance unless it was
+actually part of the encounter.
+
+Dane, 2026-08-24, on a five-sentence wellness description: *"enormous compared to what I
+need... one is too long and detailed."* He deliberately gave no sentence limit — the
+measure is the workbook, not a number. Real entries run **one to three sentences**:
+
+> EIS and EE discussed mobility and stretches for the shoulders to maintain shoulder
+> health during work related tasks.
+
+That is a complete, in-use description. Write to that scale. Coaching descriptions are
+the shortest; PA free-text fields carry more because the form has fewer of them. When
+unsure, hand over the short version and a longer one and let him pick — never one long
+one.
+
+### The plain-language rule is per field, not global
+
+It governs **Incident Details**, where Dane relays what the EE told him. It does **not**
+govern palpation and observation — those are his own exam findings and they read like an
+athletic trainer's notes. His verbatim sample, 2026-08-24:
+
+> **palpation** — Trigger points present in forearms extensors, brachioradialis, and
+> bicep brachii muscles. Limited passive ROM in wrist extension.
+>
+> **observation** — EE experienced mild pain while trying to lift 15 lb. kettlebell when
+> testing the capacity of the affected region.
+
+Named muscles, ROM terminology, and fragments are correct there. And **Observation is
+functional capacity testing, not visual inspection** — what the EE did, under what load,
+and what happened. Applying the plain-language rule to every field flattened both of
+these before Dane supplied the sample.
+
+### 🚨 Protective recommendations are NOT restrictions
+
+On the Corrective Actions page, answering that the employee is capable of all essential job
+tasks reveals a protective-recommendations question, and answering that Yes reveals a free
+text field. **That text is the highest-stakes writing in the assessment.**
+
+Dane, 2026-08-24: *"ATI is quite insistent that we get this distinction crystal clear and
+not mess it up so that we don't have OSHA work-restriction issues."* A restriction limits
+what an employee may do and carries OSHA consequences; a protective recommendation is a
+suggestion they may adopt.
+
+The workbook's `Protective Recommendations` tab shows the approved pattern — a permissive
+verb (`Encourage`, `Promote`, `Allow`, `Consider`) plus a feasibility softener (`as workflow
+allows`, `when feasible`, `during natural pauses`). Never write a numeric limit, `restricted
+to`, `may not`, `must`, `light duty`, or `unable to`. The verb decides which side of the line
+the sentence lands on. Full rule and the forbidden list: `pa_templates.md`.
+
+### 🚫 Red-flag triage is not Claude's call
+
+Page 4 of an assessment screens for red flags against `Red Flag Reference Sheet.pdf`
+(transcribed in `pa_templates.md`). Its rule: **two or more** signs/symptoms can indicate
+the need for outside referral or urgent transfer.
+
+Claude **surfaces and counts matches** — naming the list item a scenario touches. Claude
+**never writes these fields as negative and never clears anyone.** An absence found by
+text-matching a written description is not an absence found by examining a person, and the
+consequence of getting it wrong is a missed transfer.
+
+### Exam findings stay blank
+
+Palpation and observation are what **Dane** found. Templates leave them as `[ bracket
+slots ]` and never pre-fill plausible-sounding findings. A template that reads as finished
+gets pasted without a second look, and an invented finding in a medical record is worse
+than an empty field.
+
+### Controlled values still aren't guessable
+
+Primary Complaint and Categorize Mechanism are dropdowns; their option lists are recorded
+in `pa_templates.md` because **Dane supplied them**. Only page 1 of the PA has ever been
+captured to `debug/` — pages 2–6 are known from his description, not from a measurement.
+Anything not on a recorded list gets flagged for him to pick, not chosen.
 
 ## Layout
 
@@ -157,6 +279,17 @@ confirms saved, so the rest can go in without drafting anyone twice.
 - `name_match.py` — nickname-tolerant name matching; refuses ambiguous matches
 - `phi_redact.py` — the redaction engine. **Allowlist, not denylist** — read its
   module docstring before changing it; the reasoning is subtle and load-bearing.
+- `pa_templates.md` — PA / follow-up assessment templates, written in chat and saved
+  as we go. Not PHI: a template is written for many people and is about no one
+- `ENCOUNTER_INTAKE.md` — how Dane hands over a **batch** of encounters for description
+  writing: de-identified spreadsheet in, labeled blocks out. Read it before processing
+  `encounter_intake.xlsx` (gitignored)
+- `library_candidates.md` — reusable descriptions staged for the Easy Enter workbook,
+  each tagged with its target tab. Not PHI, safe to commit — but the contents are the
+  guarantee: anything that can only be true of one person belongs in `pa_writeups.md`
+- `pa_writeups.md` — **gitignored.** Finished PA / follow-up write-ups filed by
+  encounter date, so Dane can pull a date range at once. Carries no names by design,
+  but it logs real encounters on real dates — never commit it
 - `mobile_import.py` — bridge for the (unfinished) mobile capture app
 - `.github/copilot-instructions.md` — tells GitHub Copilot it is **not** PHI-cleared
 
