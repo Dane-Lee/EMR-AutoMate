@@ -23,6 +23,219 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ---
 
+## 🔥 ACTIVE 2026-08-24 — PA / follow-up assessment templates
+
+Dane is entering a 4-day backlog (8/17–8/21) of coaching encounters **and** physical
+assessments, follow-up assessments, and task assessments, against a same-morning report
+deadline. Only the coaching encounters can go through the builder — **the automation has
+no entry path for assessments** (`ati_coaching_encounter.py` only ever clicks the
+"Coaching Encounter" tile). Everything else is hand-entered, so the help that matters is
+**writing the descriptions**, which Dane pastes in as he goes.
+
+### The arrangement
+
+Scenarios are described in chat with **no identifiers** — injury, body part, mechanism,
+findings, what was done. No names, DOB, badge numbers, or person-tied dates. Dane asked
+on 2026-08-24 to hand over the encounter file itself; that was declined and he moved to
+this approach instead. The PHI boundary in `CLAUDE.md` is unchanged.
+
+### Shipped
+
+- [x] **`pa_templates.md`** — new PA / PA-Follow-Up template library. Grows as each
+      scenario is written up, so the backlog leaves a reusable library behind.
+- [x] **NOT stored in `EMR Easy Enter Worksheets.xlsx`** — `load_library()` emits one
+      entry per long cell, so a 5-field PA record dropped into a row shatters into three
+      unrelated library entries. Same class of bug as the 77-record join.
+- [x] **Controlled vocabularies recorded** — Primary Complaint (14 options) and
+      Categorize Mechanism (13 options), supplied by Dane. Templates pick only from
+      these lists; before this they carried a flagged guess.
+- [x] **Plain-language voice rule** — Dane, 2026-08-24: *"I'm not a doctor and I'm not
+      trying to sound like one. Think low level athletic trainer at best."* A
+      translation table lives in `pa_templates.md`.
+- [x] **Exam findings stay `[ bracket slots ]`** — palpation and observation are what
+      Dane found. A template that pre-fills plausible findings reads as finished and
+      gets pasted unread; a guessed finding in a medical record is worse than a blank.
+- [x] First template written: `NWC-Initial` — rolled ankle, off-the-job recreation.
+- [x] **`pa_writeups.md`** (2026-08-24, Dane's ask) — finished write-ups filed by encounter
+      date so a date range can be pulled all at once at the end, instead of copying them
+      out of chat one at a time. **Gitignored** (`.gitignore:13`) and carries no names:
+      entries are found by date + scenario. Distinct from `pa_templates.md`, which holds
+      reusable shapes about no one and is safe to commit.
+- [x] `HighImpact-PA's` tab confirmed **empty** — four headers, no text. Dane had zero
+      PA templates to work from, which is why these were the slow ones.
+
+### Session state, end of 2026-08-24
+
+**All six pages are now mapped except page 3's field types.**
+
+| Page | Status |
+|---|---|
+| 1 Encounter Details | mapped (same as coaching), captured to `debug/` |
+| 2 Symptom Details | **complete** — fields, both controlled vocabularies, templates written |
+| 3 Root Cause Analysis | field **names** known (Work Factors, ADL's, Postures, Faulty Behaviors, Suboptimal Human Movement Patterns); free-text-or-dropdown **unknown** |
+| 4 Red Flag Triage | **complete** — `Red Flag Reference Sheet.pdf` transcribed, two-or-more rule recorded |
+| 5 Corrective Actions | **complete** — 7 required Yes/No, First Aid, the conditional protective-recommendations free text |
+| 6 Plan | not mapped |
+
+**Artifacts created today:** `pa_templates.md` · `pa_writeups.md` (gitignored) ·
+`library_candidates.md` · `ENCOUNTER_INTAKE.md`. Plus `.gitignore` entries for
+`pa_writeups.md` and `encounter_intake.xlsx`.
+
+**Write-ups filed: 8.** Dated — `#1` 8/17 near-fainting follow-up, `#3` 8/18 low blood
+sugar follow-up, `#4` 8/19 forearm/palm/thumb, `#5` 8/20 elbow/forearm follow-up.
+Undated and needing dates from Dane — `#2` rolled ankle, `#6` elbow/forearm initial,
+`#7` thumb sprain, `#8` wrist lacerations.
+
+**Library candidates: 4** coaching descriptions staged with target tabs.
+
+**Voice rules learned today**, all recorded: plain language for narrative but clinical for
+exam fields · detail density over sentence count · cut the explainer second sentence ·
+observation means functional capacity testing, not visual inspection.
+
+### The 6-page PA form
+
+Page 1 Encounter Details (same as a coaching encounter, captured) · Page 2 Symptom
+Details (**complete** — Incident Details, Primary Complaint, Categorize Mechanism,
+Palpation Comments, Observation Comments) · Page 3 Root Cause Analysis · Page 4 Red Flag
+Triage · Page 5 Corrective Actions · Page 6 Plan.
+
+Only page 1 has ever been captured to `debug/`; pages 2–6 are known from Dane's
+description, not from a capture.
+
+### 🟡 Blocked on Dane — pages 3–6
+
+- [ ] Root Cause Analysis — field labels in order, dropdowns + options
+- [ ] **Red Flag Triage — Dane is sending the source doc.** Not inferrable; red-flag
+      criteria are exactly the thing not to guess at.
+- [x] ~~Corrective Actions (page 5)~~ — mapped 2026-08-24 from Dane's screenshots. Same
+      page for PAs and follow-ups. 7 required Yes/No items under **Action Taken**, then
+      **First Aid** (required Yes/No) plus two canned instruction checkboxes. Almost no
+      prose — so what helps here is Dane's default answers, not written descriptions.
+- [x] **🚨 Protective recommendations ≠ restrictions** — recorded 2026-08-24 in
+      `CLAUDE.md` and `pa_templates.md` with the approved verb pattern and a forbidden-word
+      list. OSHA work-restriction exposure for ATI if written wrong. Highest-stakes text in
+      the assessment.
+- [x] **Page 4 Red Flag Triage source supplied** 2026-08-24 (`Red Flag Reference Sheet.pdf`),
+      transcribed into `pa_templates.md` with the two-or-more referral rule and a hard
+      boundary: Claude surfaces matches, never clears anyone, never writes the fields
+      negative. Three drafted write-ups touch the lists — the wrist lacerations one is a
+      direct hit (`Lacerations` is named on the Mechanism of Injury list).
+- [ ] **Page 3 Root Cause Analysis — free text or dropdowns?** Five field names known from
+      the intake template; types and options are not. A screenshot settles it.
+- [ ] **Rework the total-health-and-wellness education text.** Dane 2026-08-24: *"your
+      total health and wellness info is terrible."* Parked to after the backlog. Drafts are
+      marked REJECTED in `pa_templates.md` — do not reuse. Best approach is to have Dane
+      describe what he actually covers rather than guessing at wellness topics.
+- [ ] **Fill the ten empty body regions** in the workbook's `Protective Recommendations`
+      tab (Feet, Hips, Low Back, Upper Back, Neck, Face/Head, Shoulder, Elbow, Wrist,
+      Hand). Only Knees is written. Offered 2026-08-24, not yet taken up.
+- [ ] **Does page 5 take free text at all?** None visible in the captures. If not, the
+      gauze-padding narrative from write-up `#4` needs a home — page 6 Plan, or the
+      **Notes** panel visible along the right edge of every screenshot.
+- [ ] Plan — field labels + controlled lists
+- [ ] Whether **PA Follow-Up** shares the same 6 pages/fields or needs its own shapes
+
+### 🟡 Open questions
+
+- [ ] Rolled ankle with no fall — `slip/trip/fall` or `other`? Recurs constantly.
+- [x] ~~Acute vs. subacute cutoff~~ — answered 2026-08-24: acute = sudden + last couple
+      of days; subacute = under 90 days and/or less sudden; chronic = over 90 days.
+- [ ] Date for the rolled-ankle write-up — filed under "Undated" in `pa_writeups.md`.
+- [ ] What the "nearly" covers in *nearly* identical follow-up format.
+- [x] ~~Companion file for coaching descriptions~~ — **answered 2026-08-24**, Dane asked
+      for reusable descriptions to be tracked by library category. Now
+      `library_candidates.md`: reusable text staged with its target workbook tab, safe to
+      commit. Distinct from `new_descriptions_for_library.csv`, which is per-encounter
+      (PHI) and stays off limits. Four candidates backfilled from the 8/24 session.
+- [x] **`ENCOUNTER_INTAKE.md`** (2026-08-24, Dane's ask) — spec for handing over a batch
+      of encounters as a de-identified spreadsheet instead of one scenario at a time.
+      Required columns, the `ref` key that lets Dane map output back to people, the
+      probe-then-confirm-then-generate process, and what stays flagged rather than
+      decided. `encounter_intake.xlsx` is gitignored (`.gitignore:17`).
+- [ ] **First batch run** — Dane supplies `encounter_intake.xlsx`. Step 1 is an aggregate
+      column probe (headers + fill counts, no cell contents), then confirm the mapping
+      with him before generating anything.
+- [ ] **Merge `library_candidates.md` into the workbook** when the backlog clears. One
+      description per cell — joining cells is the 77-record bug. `Choose …` hints unknown
+      for all four; Dane adds them at merge time.
+
+### Worth doing when the backlog is clear
+
+- [ ] **Capture pages 2–6 of a PA** the way page 1 was captured. `--capture-assessment`
+      stops at the first screen. Real captures would replace Dane's dictated field lists
+      with measured ones and settle the dropdown options directly.
+- [ ] Reconsider an entry path for assessments. Long-standing "NEXT" item; this backlog
+      is the argument for it.
+
+---
+
+## ⏸ PARKED 2026-08-20 — Roster sync: push identifiers in, get a deactivation list out
+
+Parked at Dane's call while he catches up on 3 days of encounters. **The code is written,
+compiles, and is offline-tested — none of it has been run against the live EMR yet.**
+
+Dane's two asks (2026-08-18): (1) push badge/identifier + hire date for new hires the EMR
+doesn't have yet; (2) get a list of everyone in the EMR who is NOT on the active roster,
+so he can deactivate them by hand.
+
+### Shipped in `update_employees.py` (not yet live-run)
+
+- [x] **The `inactive` flag is read.** `_ROW_RE` captures the row's class list and
+      `parse_roster_html` sets `active`. The EMR marks deactivated people with
+      `class="details  inactive"` — MEASURED across all 779 saved dashboard captures,
+      not inferred. Before this, `emr_not_in_roster.csv` mixed "should be deactivated"
+      with "already deactivated"; ~203 of the July file's 711 rows were the latter.
+- [x] **`emr_not_in_roster.csv` gains `active_in_emr` + `action`.** Still-active sort to
+      the top; already-inactive are flagged and sink to the bottom.
+- [x] **`--report`** — read-only reconciliation, both directions. Opens no edit form,
+      saves no record, leaves `employee_updates_log.csv` alone.
+- [x] **Both worklists are written BEFORE the confirmation popup** in a normal run, so
+      cancelling — or an expired session mid-batch — still leaves them behind. They used
+      to be written at the very end of `run()`, so answering "No" produced nothing.
+- [x] **Rehire signal** — roster rows that match an *inactive* EMR record are counted and
+      reported. Never acted on; reactivating is Dane's call.
+- [x] Shared helpers (`resolve_all`, `write_roster_not_in_emr`, `write_emr_not_in_roster`,
+      `print_emr_not_in_roster`) so `run()` and `run_report()` can't drift.
+- [x] Verified offline: the parser reproduces the measured 735 active / 203 inactive
+      split; the writers were tested with fake names against a scratch dir.
+
+### 🔴 BLOCKER — is the dashboard one worksite or all of them?
+
+Dane, 2026-08-20: *"there are technically employees from other sites in my EMR account.
+I don't know all of the different sites or even how many other sites there are."*
+
+**Until this is settled, `emr_not_in_roster.csv` is a REVIEW list, not a DEACTIVATE
+list.** An active employee at another site lands on it looking exactly like a terminated
+Navarre one. Do not action it.
+
+What is actually known: the header names ONE location
+(`.info-container .details .location`) with a group switcher beside it
+(`.nav-item.group-icon`), which *looks* site-scoped — but that is an inference, not a
+measurement. Across all 779 captures the roster only drifts 735→742 active with inactive
+pinned at 203, i.e. hiring over time, never a site switch. And 735 active against ~257 on
+the Navarre roster fits EITHER "years of turnover at one site" OR "other sites are in
+here". The counts cannot separate the two.
+
+- [ ] **Run `python update_employees.py --capture-sites`** — read-only; reads no roster
+      file, so it does NOT wait on HR. Report the worksite name it prints and how many
+      sites the switcher lists, then read `debug/*_EMP_sites_menu.html` and add per-site
+      scoping if it turns out to be needed.
+
+### Then, once HR provides the fresh headcount
+
+- [ ] `cp roster.xlsx roster.bak-<date>.xlsx` — `--from-hc` overwrites `roster.xlsx`
+- [ ] `python update_employees.py --from-hc "<new export>.xlsx"` — the export needs
+      `Associate ID`, `Associate Name`, `Shift`, `Primary Position`,
+      `Most Recent Hire Date`, plus `Department`/`Division` for the builder's work areas
+- [ ] `python update_employees.py --report` — read-only; proves login/worksite/parse and
+      hands over both worklists
+- [ ] `python update_employees.py` — the actual identifier + hire-date writes
+
+Ask (1), the identifier writes, is **unaffected by the blocker**: it only touches people
+the roster explicitly matches. Only the deactivation list is on hold.
+
+---
+
 ## ✅ DONE 2026-08-10 — duplicate-entry guard, import hardening, two papercuts
 
 Full narrative in `WORKLOG.md` Session 18. **A stale batch put 2 duplicate drafts in
