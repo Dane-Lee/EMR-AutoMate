@@ -20,6 +20,14 @@ encounter_intake.*.xlsx
 # Dane's working intake template. Blank when supplied 2026-08-24, but it is the file he
 # fills with real encounters — the roster_template.xlsx trap. Never committed.
 Encounter Intake Template.xlsx
+
+# intake_grid.py's working files (2026-08-25). De-identified by construction — the sheet
+# has no name column — but they are real encounters on a real date, the same standing as
+# pa_writeups.md. The sheet is what Dane types; the outbox is what gets handed to a
+# headless run; the inbox is what comes back.
+intake_sheet.json
+intake_outbox.json
+intake_inbox.json
 # Working input with the real employee roster (PII) — template is safe to commit
 roster.xlsx
 # Audit log of employee updates (old->new employee PII)
@@ -28,7 +36,11 @@ employee_updates_log.csv
 gender_review_needed.csv
 nickname_candidates.csv
 identifier_shortened.csv
+# New hires with no department/division after an import — a worklist of names (PII)
+work_area_todo.csv
 emr_not_in_roster.csv
+# The active-only slice of it, with Dane's review columns. Same contents, same rule.
+emr_review_active.csv
 # Roster rows not found in the EMR (new-hire worklist, PII) + targeted re-run sheet
 roster_not_in_emr.csv
 roster_rerun.xlsx
@@ -59,6 +71,12 @@ encounter_log.csv
 # Real employee data / notes dropped into the project folder (PII / PHI)
 *EMR_notes*
 Active Associates*.xlsx
+# HC renames its export between runs — the 8-25-26 one arrived as "Navarre Active
+# Employees 8.25.26.xlsx" and matched none of the rules above. These are full employee
+# rosters (PII): match on what they ARE, not on one report title.
+*Active Employees*.xlsx
+*Navarre*.xlsx
+*Associates*.xlsx
 EMR Easy Enter Worksheets.xlsx
 # Backups of roster.xlsx (real roster PII), like roster.xlsx itself. Broad on
 # purpose: any roster.<something>.xlsx is a dated/labelled copy of the real roster.
@@ -90,3 +108,62 @@ Thumbs.db
 tracker_capture.json
 tracker_capture.*.json
 *.imported.*.json
+
+# The 511-row review workbook — same contents as emr_review_active.csv (PII)
+EMR Review - */.xlsx
+EMR Review - *.xlsx
+
+# Deactivate worklist + the held-back records (PII), same rule as their source
+EMR Deactivate Worklist.xlsx
+EMR Hold - *.xlsx
+
+# Duplicate analysis pulled from the 511 review (PII)
+EMR Duplicates - *.xlsx
+
+# Records deactivated in error, pending reactivation (PII)
+EMR REACTIVATE*.xlsx
+
+# Remaining roster<->EMR gap worklist (PII)
+EMR Remaining Gap.xlsx
+
+# Date-of-Hire run sheets (names + hire dates, PII)
+roster_doh*.xlsx
+
+# Date-of-Hire hand-entry worklist (names + hire dates, PII)
+EMR Date of Hire*.xlsx
+
+# Identifier mismatch worklist (names + badges, PII)
+EMR Identifier Updates.xlsx
+
+# Still-unmatched roster rows (PII)
+EMR Still Unmatched.xlsx
+
+# Remaining active EMR records with no roster row (PII)
+EMR Still Active*.xlsx
+
+# Roster push sheets (names + identifiers, PII)
+roster_push*.xlsx
+
+# Case List reports (case_report.py, 2026-09-08). Grouped lists of who was seen on
+# which date — real names on real dates, the same standing as encounter_log.csv.
+# The --demo run writes fake names to the same filename pattern; ignored either way.
+case_report*.xlsx
+case_report*.docx
+
+# 2026-09-08: two PHI worklists were sitting untracked and NOT ignored, because the
+# rules named one exact filename each and the working copies carry a suffix
+# ('EMR Deactivate Worklist.prev484.xlsx', 'roster_not_in_emr.prev.csv'). Match what
+# these files ARE, not one report title -- the same lesson as the *Active Employees*
+# rule above.
+EMR Deactivate Worklist*.xlsx
+roster_not_in_emr*.csv
+emr_not_in_roster*.csv
+emr_review_active*.csv
+gender_review_needed*.csv
+identifier_shortened*.csv
+date_of_hire_todo*.csv
+date_not_persisted*.csv
+encounter_log*.csv
+encounters.bak*.csv
+pa_follow_ups*.csv
+new_descriptions_for_library*.csv

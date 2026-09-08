@@ -1,15 +1,47 @@
 # EMR AutoMate
 
 Automates entering Coaching Encounters into the ATI Worksite Solutions EMR for Dane,
-an injury-prevention specialist. Python + Playwright drives a real browser. There are
-**no AI/API calls in the runtime** — the only host it talks to is the EMR itself. Keep
-it that way.
+an injury-prevention specialist. Python + Playwright drives a real browser. The only
+host the automation itself talks to is the EMR.
 
 Dane builds a batch by checking names off the roster in `encounter_builder.py`; the
-automation enters it as drafts. There is no dictation and no AI in the pipeline — the
+automation enters it as drafts. There is no dictation anywhere in the pipeline — the
 M365 Copilot intake was removed 2026-07-16 because the dictation round-trip was
 miserable and an LLM kept guessing at controlled values it had no business guessing.
 **Don't reintroduce it.**
+
+### The one AI call, and why it is not that (added 2026-09-04)
+
+`encounter_builder.py` can now send a batch's **description notes** to a headless
+`claude -p` when Dane writes the batch: he ticks "Note only", types *"hydration and
+magnesium"*, and gets the description back. He can also leave the coaching type as
+**"— suggest it from my note —"** and get a recommendation. Dane asked for both.
+
+That is not the thing that was removed, and the difference is worth being precise about:
+
+| removed 2026-07-16 | added 2026-09-04 |
+|---|---|
+| dictation → transcript → an LLM | Dane types the note himself |
+| the LLM chose controlled values from prose | he sets every controlled value but one |
+| its picks flowed to the record unreviewed | he reviews every suggestion, and ticks every detail box himself |
+
+The guards, in `_resolve_pending`:
+
+- **A suggested coaching type is checked against `COACHING_TYPE_UUIDS`** before it can
+  touch a row. An off-list answer is refused, not corrected.
+- **All or nothing.** If any job comes back short, `encounters.csv` is not written. A
+  note is not a description and the sentinel is not a coaching type.
+- **Detail checkboxes, encounter type, category, department, shift and date are never
+  asked for and never accepted.** Dane sets all of them.
+- **The notes are scanned against the loaded roster before anything is sent.**
+  `ENCOUNTER_INTAKE.md` concedes Claude cannot make that check — by the time it could
+  look it has already read the note. The builder can, because the names are in memory.
+
+What crosses the line is the note, a head count, and the coaching type. No name, no
+date, no department, no shift. The map from a job back to the people in it is the
+group's index in the batch and never leaves the process. This is
+`ENCOUNTER_INTAKE.md`'s de-identified handover with the spreadsheet taken out, and it
+sits on no new exception to the PHI boundary. Tests: `test_description_writing.py`.
 
 ## The PHI boundary — read this first
 
@@ -34,6 +66,7 @@ assessments_todo.md         new_descriptions_todo.md date_of_hire_todo.csv
 new_descriptions_for_library.csv                     identifier_shortened.csv
 emr_not_in_roster.csv       roster_not_in_emr.csv    gender_review_needed.csv
 roster.*.xlsx               *EMR_notes*              "Active Associates*.xlsx"
+case_report*.xlsx           case_report*.docx
 ```
 
 `roster.*.xlsx` (a dot) is dated/labelled copies of the real roster — `roster.2026-07-01.xlsx`,
@@ -140,7 +173,17 @@ python update_employees.py --from-hc <xlsx>     # HC export -> roster.xlsx (no b
 python update_employees.py --report             # READ-ONLY roster<->EMR reconciliation
 python update_employees.py --capture-sites      # READ-ONLY: which worksite? how many?
 python update_employees.py                      # push roster.xlsx into the EMR
+
+python case_report.py --capture                 # READ-ONLY: snap + census the Case List
+python case_report.py --capture-filters         # READ-ONLY: snap each filter chip
+python case_report.py --survey --specialist X   # READ-ONLY: counts only (pages, rows)
+python case_report.py --capture-case --specialist X   # READ-ONLY: one case summary
+python case_report.py --from 09/01/2026 --to 09/08/2026 --format both --specialist X
+python case_report.py --demo                    # the writers, fake names, no browser
 ```
+
+`--specialist` is **required** for a report and takes the name as the EMR's Specialists
+filter spells it; the builder passes it from `builder_prefs.json`.
 
 `--report` opens the browser but only reads: it writes `emr_not_in_roster.csv` (who is
 in the EMR with no active-roster row — the deactivate-these worklist, with anyone
@@ -268,9 +311,148 @@ in `pa_templates.md` because **Dane supplied them**. Only page 1 of the PA has e
 captured to `debug/` — pages 2–6 are known from his description, not from a measurement.
 Anything not on a recorded list gets flagged for him to pick, not chosen.
 
+## Reading a batch back out: the Case list report (added 2026-09-08)
+
+The builder is now a **two-tab window**. "Build a batch" is everything above,
+unchanged, moved onto a tab. **"Case list report"** runs the other direction: pick a
+date range, pick Excel / Word / both, and `case_report.py` opens the EMR's **Case
+List**, reads it, and writes a local report grouped
+
+    date → case type → coaching type → employee (alphabetical)
+
+Dane chose that shape and chose the **Date of Encounter** as the date it filters on
+(2026-09-08) — not when the case was keyed in, which drifts whenever a batch goes in
+days later. Excel also gets a flat filterable sheet and a counts summary; Word gets
+the reading layout only.
+
+It is **read-only**, the same standing as `update_employees --report`: it navigates,
+it reads, it closes. It never opens a case for editing.
+
+The **"In Progress" modal blocks the way in.** After login the EMR asks *"navigate to
+the 'In Progress' case list?"* whenever Dane has drafts — i.e. nearly always — and it
+sits over the page and swallows the sidebar click. `open_case_list` answers **No**
+first, reusing `ati_coaching_encounter.dismiss_in_progress_prompt` (the entry engine
+has cleared this same modal since 2026-07-23). Yes would land on the drafts list, and
+the reader would page through drafts instead of cases.
+
+The finished file **opens itself** (`open_file`), and the tab has an **Open last
+report** button for a run from another day — Dane asked not to go hunting in the
+project folder (2026-09-08). `--no-open` suppresses it. Neither path reads the file;
+they hand the path to Windows.
+
+**The output is PHI** — every line is a real person on a real date. `case_report*.xlsx`
+and `case_report*.docx` are gitignored and on the never-read list above.
+
+### 🚨 The encounter date sits next to the date of birth
+
+Measured 2026-09-08, and the single most dangerous thing on that page. **The date is
+not a column.** It is the third labelled `title`/`value` pair inside the *Employee*
+cell:
+
+```
+Smith, Jane
+DOB:      --                 ← the employee's DATE OF BIRTH
+ID:       99999-Weld-1st
+Enc.D. :  Jan 01, 1990       ← the date the report filters on
+```
+
+`parse_case_rows` matches **by label**, normalising `"Enc.D. :"` to `encd`, and
+`_FORBIDDEN_LABELS` refuses `dob` and `id` outright. It never reads by position, and a
+row with no `Enc.D.` pair comes back `date=None` and is counted out loud rather than
+borrowing whatever date is nearby. A positional read that slipped one row would file
+every case under a date of birth, in a document that goes to ATI.
+`test_case_report.py` puts a real date in the DOB slot to keep that honest.
+
+### What the Case List does and doesn't carry
+
+- **Case type** is the coloured chip, and it is **abbreviated** (`HMA`, and two- and
+  six-character codes). It goes into the report as the page writes it — no invented
+  expansion to a full name.
+- **Coaching type is not on this page at all.** Dane asked for that level and the
+  grouping still has it; it simply comes out empty, and both the tab and the report's
+  Summary sheet say so. The only place it could come from is each case's own summary
+  page, which has never been captured — so it is not written.
+- **No status** either.
+- **Location** is there, and every row is Dane's own worksite (he checked 2026-09-08).
+
+### 🚨 A follow-up's date is NOT on the Case List — the report is incomplete
+
+Dane, 2026-09-08. A follow-up is entered with **its own date**, but the Case List row
+keeps showing the case's **original** Enc.D. So a follow-up done last week on a case
+opened in February is invisible to a range filter over the displayed date.
+
+`FOLLOWUP_CAVEAT` is stamped on the workbook, the Word document and the finishing
+dialog. **That is a stopgap.** Under-reporting silently is the worst failure this tool
+has: a short list of last week's work looks exactly like a light week. The fix needs
+the case summary page (`/cases/summary?id=…`), which **has never been captured** —
+`--capture-case` is the one command that unblocks it. See `TODO.md`.
+
+Only **104 of 2,211** cases carry follow-ups (measured), and a follow-up is always
+*after* its case's original date, so cases originating after the range end can be
+skipped. That is what makes opening them one at a time affordable.
+
+### The specialist filter is mandatory, and the walk sweeps everything
+
+**Unfiltered, the list mixes in other specialists' cases.** `run_report` refuses
+without a `--specialist`, and `apply_specialist_filter` ticks that name and applies it
+before anything is read. Which chip is the specialist filter is **not** decided by its
+label — it tries the likeliest first, but what identifies it is finding the name among
+its options. Ambiguous name → picks nobody. The name lives in `builder_prefs.json`
+(gitignored); it is Dane's own and has no business in tracked source.
+
+`harvest()` walks **every page, every time** — there is no early stop. There used to
+be one, resting on the list being newest-first. The survey measured that and it is
+false: across 2,211 cases the displayed date drops **174 times within a page and 5
+times between pages**. The list is ordered by something the page doesn't show,
+plausibly last activity, while displaying each case's original date. Truncating on an
+order that isn't there would cut the report short somewhere unpredictable.
+
+Sweeping is affordable because the same survey measured it: **74 pages at 30 rows,
+about two minutes** for his whole caseload (2026-02-24 .. 2026-09-03 — six months, not
+the years the four-digit pager implied; that count was other specialists' cases).
+`MAX_PAGES = 400` is a wall, and hitting it is reported, not hidden.
+
+### The read-only probes, and why there are four
+
+Each one exists because something could not be answered from a desk. All are
+read-only, all write to `debug/`, none change the EMR.
+
+- `--capture` — the page's markup + a **structure census** (tag/class signatures and
+  counts, never text), with the preloaded 957-row employee sidebar pruned so the real
+  content isn't buried.
+- `--capture-filters` — opens each filter chip and snaps it. This is how the
+  specialist filter's markup was measured.
+- `--survey` — walks the filtered list and reports **counts only**: pages, rows,
+  follow-up histogram, how far the dates depart from newest-first. This is the run
+  that killed the early stop.
+- `--capture-case` — opens one case that has follow-ups and snaps its summary page.
+  **Not yet run.** It is the next step.
+
+`diagnose_dates` deserves its own note: when no date parses it writes
+`debug/CASES_date_diagnosis.txt` with the labels and the value's **shape** —
+`Aaa 99 9999`, digits to 9 and letters to A/a. A shape is a format, not a date, so it
+can be read freely; that is how `Sep 08 2026` (no comma) was found without anyone
+looking at a real one.
+
+### The capture is still there
+
+`--capture` opens the page read-only, snaps the scrubbed HTML to `debug/`, and prints a
+**structure census** — tag/class signatures and counts, never text, with the preloaded
+957-row employee sidebar pruned so the actual page content isn't buried. Run it again
+if the EMR changes and the reader starts coming up short; that is how the parser was
+written in the first place, and `PARSER_READY` is the switch that keeps a
+never-measured page from being read by a guess.
+
 ## Layout
 
-- `encounter_builder.py` — the batch builder (roster checklist, group apply, library)
+- `encounter_builder.py` — the batch builder (roster checklist, group apply, library),
+  and the note → description round trip described above (`_resolve_pending`).
+  Two tabs since 2026-09-08: the builder, and the Case list report
+- `case_report.py` — the report tab's engine. READ-ONLY read of the EMR's Case List,
+  the grouping/sorting, both writers, and the structure census that measures the page.
+  Tests: `test_case_report.py`
+- `intake_runner.py` — the headless `claude -p` transport. `run()` serves the intake
+  grid; `run_coaching()` serves the builder. One call per batch, never one per row
 - `ati_coaching_encounter.py` — the encounter automation (form filling, `snap()`, batch,
   pre-flight, `--audit`, `--resume`)
 - `update_employees.py` — roster sync tool; also the reference for the EMR's roster row

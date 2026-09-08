@@ -23,6 +23,120 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ---
 
+## [~] 2026-09-08 - Case list report (builder tab 2)  -- PAUSED mid-fix
+
+Dane asked for a reader: scan the EMR's **Case List**, pull everything in a date range,
+and write a spreadsheet or Word doc grouped and alphabetised. Built as a second tab on
+the encounter builder - same worksite, same browser profile, pointed the other way.
+
+Shape he chose: **date -> case type -> employee**, filtered on the encounter date.
+Read-only throughout. Output is PHI: `case_report*.xlsx` / `.docx`, gitignored and on
+CLAUDE.md's never-read list.
+
+### Working today
+
+- [x] `case_report.py` - grouping, sorting, Excel (3 sheets) and Word writers
+- [x] The "Case list report" tab: date range + presets, format, Specialist box,
+      Build / Open last report / Capture. The finished file opens itself
+- [x] Read-only probes: `--capture`, `--capture-filters`, `--survey`, `--capture-case`
+- [x] `parse_case_rows` - row markup measured, date matched BY LABEL (see the trap below)
+- [x] Specialist filter applied before reading; the run refuses without one
+- [x] The In Progress modal is answered No before navigating
+- [x] Every exit path ends in a dialog (a silent failure looked like a crash)
+- [x] `test_case_report.py` (~70 checks) + the tab's checks in `test_builder_ui.py`
+
+### THE OPEN PROBLEM: follow-up dates are not on the Case List
+
+Dane, 2026-09-08: a follow-up is entered with **its own date**, but the Case List row
+keeps showing the case's **original** Enc.D. So a follow-up done last week on a case
+opened in February is invisible to a range filter over the displayed date.
+
+**The report currently under-reports, and says so** - `FOLLOWUP_CAVEAT` is stamped on
+the workbook, the Word doc and the finishing dialog. That is a stopgap, not the fix.
+
+**NEXT STEP, one command:**
+
+    python case_report.py --capture-case --specialist "<name from builder_prefs.json>"
+
+Read-only. It finds the first case with follow-ups, opens its Case Overview page and
+snaps it (scrubbed) plus a structure census. Nobody has ever captured that page, so
+the reader cannot be written until it exists. Then:
+
+- [ ] Write the follow-up reader from that capture
+- [ ] In `run_report`, open only the cases that need it and fold their dated entries in
+- [ ] Drop `FOLLOWUP_CAVEAT` once the dates are real
+- [ ] Then: Dane runs it for a small range and checks it against what he entered
+
+The pruning rule that makes this affordable: a follow-up is always AFTER its case's
+original date, so any case originating after the range end cannot hold one inside it.
+
+### What the 2026-09-08 survey measured (debug/CASES_survey.txt)
+
+    74 pages, 2211 cases        his whole filtered caseload, ~2 minutes
+    104 rows with follow-ups    4.7% - only these need opening
+    0 undated, 0 unreadable     the parser reads every row
+    span 2026-02-24..2026-09-03 six months, not the years the pager implied
+    order: 174 drops in-page, 5 between pages
+
+That last line killed the early stop. The list is NOT ordered by the date it displays -
+it is ordered by something the page doesn't show, probably last activity. `harvest()`
+now sweeps **every page, every time**; truncating on an order that isn't there would
+have cut the report short somewhere unpredictable, and a short report looks exactly
+like a quiet week.
+
+### Also still missing: coaching type
+
+Not on the Case List at all - the chip is an abbreviated CASE type (`HMA`, plus two-
+and six-character codes) and there is no status either. Dane asked for a coaching-type
+level; the grouping has one and it comes out blank, and the tab and Summary sheet say
+why. It would have to come from the same case summary page as the follow-up dates.
+
+### The trap in that page, for whoever reads this next
+
+The encounter date is **not a column**. It is a labelled pair inside the Employee cell -
+`DOB :`, `ID :`, `Enc.D :` - and the **date of birth is two pairs above it**. The parser
+matches on the label and refuses `dob`/`id` first; the test puts a real date in the DOB
+slot so a positional read fails in the test instead of in a medical record. The date
+format is `Sep 08 2026`, **no comma** - the comma'd form was all `_DATE_FORMATS` had,
+and every row came back dateless on the first real run.
+
+## ✅ DONE 2026-09-03 — Builder UI: Individuals stripped, sections fold, warm-gray ground
+
+Dane's spec, built the same day he unparked it. Guarded by `test_builder_ui.py`.
+
+Two things the spec did not say, decided while building and worth knowing:
+
+- **Individual mode now IGNORES the area/shift/role filters**, it does not just hide
+  them. Hiding a filter that still applies is a trap: with `Admin` hidden between runs,
+  a name in it would never appear and nothing on screen would explain why.
+- **Details folds on the accordion, not on a click.** It is multi-select; folding it on
+  the first checkbox would put the second out of reach.
+
+### 1. Individuals tab — strip the name-selection screen down
+
+Remove from that screen:
+- Shift selection
+- Role selection
+- Areas to show
+- The "loaded: shown - filtered out - # on the roster" line
+
+What's left: **a search box to type in, and the roster box below it. That's it.**
+
+### 2. Every tab — collapsible sections
+
+- Encounter Type (In Person, Via Phone or Microsoft Teams, etc.) → collapsible, **collapsed
+  by default**
+- Coaching Type → collapses once selected
+- Details → collapses once selected
+- Category → can collapse as the default state
+- Prompted by → collapses once selected
+
+### 3. Theme
+
+Brighten the overall background to a **warm gray**, replacing the current black.
+
+---
+
 ## 🔥 ACTIVE 2026-08-24 — PA / follow-up assessment templates
 
 Dane is entering a 4-day backlog (8/17–8/21) of coaching encounters **and** physical
