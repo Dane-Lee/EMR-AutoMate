@@ -1,7 +1,11 @@
 """
 encounter_builder.py — build encounters.csv by checking names off the roster
 ===========================================================================
-The Copilot replacement. No AI, no cloud, no dictation, no transcription.
+The Copilot replacement. No dictation, no transcription, and nothing guessed.
+
+One optional step reaches out: a description left as a NOTE, or a coaching type left as
+SUGGEST_TYPE, is written by a headless `claude -p` when the batch is written. Notes
+only — see _resolve_pending, which is where the guards live.
 
 A day of coaching is mostly ONE fact repeated: the same coaching, delivered to a list
 of people. Dictating that makes you recall and pronounce every name, then hope
@@ -44,16 +48,19 @@ PHI
 import csv
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
-from datetime import date, datetime
+import threading
+from datetime import date, datetime, timedelta
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 import emr_field_map as fm
 import ati_coaching_encounter as ace
+import case_report          # the Case list report tab (read-only, no browser on import)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 ROSTER_XLSX = os.path.join(_HERE, "roster.xlsx")
@@ -64,6 +71,12 @@ PREFS_JSON = os.path.join(_HERE, "builder_prefs.json")
 
 # No default. An unset coaching type blocks the group — see the module docstring.
 PICK_ONE = "— pick one —"
+
+# Coaching type left to Claude. A SENTINEL, not a value: it is never in
+# COACHING_TYPE_UUIDS, so if one ever survived to the CSV the validator would reject the
+# batch before a browser opened. _resolve_pending replaces every one of these with a real
+# EMR value at write time, or nothing is written at all.
+SUGGEST_TYPE = "— suggest it from my note —"
 BLANK = ""
 
 # Checked names get a filled box + a tinted row so the pick is obvious at a glance
@@ -75,25 +88,47 @@ CHECK_ON = "☑"
 # against the window and clipped for weeks because nothing tied the two together.
 ROSTER_PANEL_PX = 430
 CHECK_OFF = "☐"
-CHECK_BG = "#2b2517"       # amber wash — the checked row
-CHECK_FG = "#f0a32b"
+CHECK_BG = "#f2d296"       # amber wash — the checked row. Deepened 2026-09-04:
+                           # against the lighter card it sat at 1.11:1 and the
+                           # "who did I check" signal was all but gone, while
+                           # every text-contrast check still passed.
+CHECK_FG = "#8a4b00"
 
-# ── "Shift Board" palette (Dane's pick, 2026-07-31) ──────────────────────────
-# The vernacular of the plant floor: shift boards, safety signage, equipment panels.
-# Replaces the grey-and-white scheme Dane found hard to look at. The ground is a
-# blue-biased slate rather than a neutral grey (a pure mid-grey reads as unconsidered),
-# and amber carries EVERY active state — selection, focus, primary action — so there is
-# exactly one thing to look for. Hi-vis green is reserved for confirmation counts alone;
-# spending it anywhere else would put two "look here" colours on one screen.
-UI_BG = "#14181d"           # slate ground — window / panel background
-UI_CARD = "#1e242b"         # inputs, cards, the name list
-UI_TEXT = "#e4e8ec"         # primary text
-UI_MUTED = "#8b95a1"        # secondary / hint text
-UI_BORDER = "#2e3742"       # thin borders and separators
-UI_ACCENT = "#f0a32b"       # safety amber — focus / primary action / selection
-UI_ACCENT_SOFT = "#2a2419"  # hover / subtle fill (amber sunk into the slate)
-UI_CONFIRM = "#9dbe3b"      # hi-vis — confirmation counts ONLY
-UI_ON_ACCENT = "#14181d"    # text/glyphs sitting ON amber: slate, never white
+# ── "Shift Board", warm-gray ground (Dane, 2026-09-03) ───────────────────────
+# Was a near-black blue slate (#14181D). Dane: "Brighten the background overall to a
+# warm gray instead of the black." So the ground flipped light, and every other value
+# had to move with it — a palette is a set of relationships, not a list of colours, and
+# the dark rail/accent/confirm values were all chosen to clear 4.5:1 against a dark
+# card. They would all fail on a light one.
+#
+# What did NOT change is the grammar: warm gray is still the plant-floor register
+# (equipment panels, signage board), amber still carries EVERY active state — selection,
+# focus, primary action — so there is exactly one thing to look for, and the hi-vis
+# green is still reserved for confirmation counts alone.
+#
+# ⚠️ The accent had to become TWO tokens, and this is the part that is easy to get wrong.
+# On the dark ground one amber did every job. On a light ground no single amber can:
+#
+#   * bright enough to read as safety amber when FILLED (a button, a selected chip)
+#     lands at ~2.4:1 as TEXT on the warm gray — unreadable for the section headers and
+#     panel legends, which are the loudest text in the window
+#   * dark enough to be legible TEXT is a brown, and a brown fill is not this UI
+#
+# So UI_ACCENT fills (with the dark ground colour as its text, exactly the grammar the
+# dark theme used) and UI_ACCENT_TEXT draws accent-coloured text, focus rings and hover
+# borders. Both were measured, not eyeballed — see the contrast block in the smoke test.
+UI_BG = "#d9d3ca"            # warm gray ground — window / panel background
+UI_CARD = "#f2efe9"          # inputs, cards, the name list — lifts off the ground
+UI_TEXT = "#2b2723"          # primary text — warm near-black
+UI_MUTED = "#5d564e"         # secondary / hint text
+UI_BORDER = "#bdb5a9"        # thin borders and separators
+UI_ACCENT = "#d4820e"        # safety amber — FILLS only (4.94:1 with UI_ON_ACCENT on it)
+UI_ACCENT_TEXT = "#7d4104"   # accent as TEXT / focus ring (5.37:1 on the ground)
+UI_ACCENT_SOFT = "#f0dfc2"   # hover / subtle fill (amber floated onto the warm gray)
+UI_CONFIRM = "#405a0d"       # hi-vis — confirmation counts ONLY
+UI_ON_ACCENT = "#2f2a24"     # text/glyphs sitting ON amber: the dark ground, not white
+UI_ACCENT_HOVER = "#e89a2c"  # accent button, hover
+UI_ACCENT_PRESS = "#b06a08"  # accent button, pressed
 
 # The shift rail: a coloured bar down the left edge of every roster row, so shift —
 # the thing Dane filters by constantly — reads without a column and without reading.
@@ -102,10 +137,16 @@ UI_ON_ACCENT = "#14181d"    # text/glyphs sitting ON amber: slate, never white
 # already means "active/selected" everywhere else in this UI, and a colour cannot carry
 # two meanings on one screen without the louder one winning. Blue/orchid/teal are
 # distinct from each other, from the accent, and from the confirm green, and all four
-# clear 4.5:1 against the #1E242B list ground.
+# clear 4.5:1 against the #F8F6F3 list ground — darkened from the dark theme's pastels,
+# which were picked against #1E242B and wash out completely on a light card.
+#
+# Darkening them for the light card also pushed 1st and 3rd TOGETHER: as pastels the
+# blue and the teal were told apart by lightness as much as hue, and once both were
+# taken down to ~5:1 they landed 33° apart and read as the same colour in a 1-glyph rail.
+# So 1st went deeper blue and 3rd went green-teal — 58° now, measured, not eyeballed.
 RAIL_GLYPH = "▌"
-SHIFT_RAIL = {"1st": "#5aa9d6", "2nd": "#b07bc9", "3rd": "#4fa89b"}
-SHIFT_RAIL_NONE = "#39424e"  # shift unknown/blank — present but recessive
+SHIFT_RAIL = {"1st": "#17539c", "2nd": "#7a3d95", "3rd": "#157a4f"}
+SHIFT_RAIL_NONE = "#a8a099"  # shift unknown/blank — present but recessive
 
 # Bahnschrift is Windows' DIN-derived industrial face — the lettering of machine panels
 # and safety signage, which is exactly the register this tool works in. It ships with
@@ -126,6 +167,83 @@ def _legend(text):
     shipping (see _check_legend_widths) — keep legends short enough to stay under it.
     """
     return " ".join(text.upper())
+
+
+class CollapsibleSection:
+    """One foldable block of the encounter form (Dane, 2026-09-03).
+
+    The form is a stack of option grids and only one of them is ever in play at a time,
+    so each folds to a single line once it is settled. **Folded is not hidden** — the
+    header carries the current value, so a fully folded form still reads as a summary of
+    exactly what is about to be written. That is the whole reason this is safe to do to a
+    form whose controlled values must never be guessed: nothing becomes invisible.
+
+    Two fold triggers, and the difference is not cosmetic:
+
+    * **Single-select** (encounter type, coaching type, category, prompted by) folds the
+      moment a radio is clicked. The pick IS the "done" signal.
+    * **Multi-select** (details) cannot use that trigger. Folding on the first checkbox
+      would put the second one out of reach — the field would be unusable for any
+      encounter needing two details, which is most of them. It folds when another
+      section opens, or when its own header is clicked.
+
+    Opening any section folds the others (`on_expand`), which is what keeps the form to
+    one open block without anyone having to tidy up after themselves.
+    """
+
+    CHEVRON_OPEN = "▾"
+    CHEVRON_SHUT = "▸"
+
+    def __init__(self, parent, row, label, summary, collapsed=True, on_expand=None):
+        self.summary = summary          # () -> str: the value shown while folded
+        self.on_expand = on_expand      # told when this section opens (the accordion)
+        self.collapsed = collapsed
+
+        self.header = ttk.Frame(parent)
+        self.header.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(7, 1))
+        self.chevron = ttk.Label(self.header, text="", style="Section.TLabel", width=2)
+        self.chevron.pack(side="left")
+        self.title = ttk.Label(self.header, text=label, style="Section.TLabel")
+        self.title.pack(side="left")
+        self.value = ttk.Label(self.header, text="", style="SectionValue.TLabel")
+        self.value.pack(side="left", padx=(10, 0))
+
+        # Indented so the fold structure reads down the left edge at a glance.
+        self.body = ttk.Frame(parent)
+        self.body.grid(row=row + 1, column=0, columnspan=2, sticky="ew", padx=(20, 0))
+
+        for w in (self.header, self.chevron, self.title, self.value):
+            w.bind("<Button-1>", lambda e: self.toggle())
+            try:
+                w.configure(cursor="hand2")
+            except tk.TclError:
+                pass
+        self._apply(collapsed)
+
+    def _apply(self, collapsed):
+        self.collapsed = collapsed
+        (self.body.grid_remove if collapsed else self.body.grid)()
+        self.chevron.config(text=self.CHEVRON_SHUT if collapsed else self.CHEVRON_OPEN)
+        self.refresh()
+
+    def refresh(self):
+        """Re-read the current value into the header.
+
+        Only while folded — open, the control itself already shows the pick, and a
+        second copy of it in the header is one more thing to read past.
+        """
+        self.value.config(text=self.summary() if self.collapsed else "")
+
+    def toggle(self):
+        self.collapse() if not self.collapsed else self.expand()
+
+    def collapse(self):
+        self._apply(True)
+
+    def expand(self):
+        if self.on_expand:
+            self.on_expand(self)        # fold the others first, then open
+        self._apply(False)
 
 
 COACHING_TYPES = sorted(ace.COACHING_TYPE_UUIDS)
@@ -383,23 +501,51 @@ def details_from_hint(hint, valid_details):
     return matched
 
 
-def load_prefs(path=None):
-    """Which work areas (divisions) / shifts are hidden. Set once, sticks between runs."""
+def _read_prefs(path=None):
     try:
         with open(path or PREFS_JSON, encoding="utf-8") as fh:
             data = json.load(fh)
-        return set(data.get("hidden_areas", [])), set(data.get("hidden_shifts", []))
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return set(), set()
+        return {}
+
+
+def _write_prefs(data, path=None):
+    try:
+        with open(path or PREFS_JSON, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+    except Exception:
+        pass          # a pref file that won't save must never block entering encounters
+
+
+def load_prefs(path=None):
+    """Which work areas (divisions) / shifts are hidden. Set once, sticks between runs."""
+    data = _read_prefs(path)
+    return set(data.get("hidden_areas", [])), set(data.get("hidden_shifts", []))
 
 
 def save_prefs(hidden_areas, hidden_shifts, path=None):
-    try:
-        with open(path or PREFS_JSON, "w", encoding="utf-8") as fh:
-            json.dump({"hidden_areas": sorted(hidden_areas),
-                       "hidden_shifts": sorted(hidden_shifts)}, fh, indent=2)
-    except Exception:
-        pass          # a pref file that won't save must never block entering encounters
+    # MERGE, don't overwrite: this file also holds the report tab's specialist name,
+    # and a plain rewrite here would silently drop it the next time a filter changed.
+    data = _read_prefs(path)
+    data["hidden_areas"] = sorted(hidden_areas)
+    data["hidden_shifts"] = sorted(hidden_shifts)
+    _write_prefs(data, path)
+
+
+def load_specialist(path=None):
+    """The name to tick in the EMR's Specialists filter. '' until Dane sets it.
+
+    Kept in builder_prefs.json — which is gitignored — rather than in the source: it
+    is Dane's own name, it is his to set, and it has no business in a tracked file.
+    """
+    return str(_read_prefs(path).get("specialist", "") or "").strip()
+
+
+def save_specialist(name, path=None):
+    data = _read_prefs(path)
+    data["specialist"] = str(name or "").strip()
+    _write_prefs(data, path)
 
 
 # ─────────────────────────────────────────────
@@ -455,23 +601,38 @@ class EncounterBuilder(tk.Tk):
         self.pool = []            # [name] still waiting to be assigned
         self.pool_shift = ""      # which shift the roll call was taken for
 
+        # Two jobs on one window (2026-09-08). "Build a batch" is the original layout,
+        # moved into a tab frame and otherwise untouched. "Case list report" reads
+        # finished work back OUT of the EMR — the opposite direction, same worksite,
+        # same browser profile, so it belongs here rather than in a second tool.
+        self.book = ttk.Notebook(self)
+        self.book.grid(row=0, column=0, sticky="nsew")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        self.build_tab = ttk.Frame(self.book)
+        self.book.add(self.build_tab, text="Build a batch")
+        self.report_tab = ttk.Frame(self.book)
+        self.book.add(self.report_tab, text="Case list report")
+
         # Row 0 (the panels) takes every spare pixel; row 1 (the batch bar) keeps its
         # own height no matter how small the window gets, so the buttons that finish
         # the job can never end up off-screen.
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=0)
+        self.build_tab.grid_rowconfigure(0, weight=1)
+        self.build_tab.grid_rowconfigure(1, weight=0)
         # The roster takes the slack, not the form: the group panel needs a fixed
         # ~490px and no more, so every spare pixel goes to the name list — which is
         # the thing you actually read 262 lines of.
-        self.grid_columnconfigure(0, weight=1, minsize=ROSTER_PANEL_PX)
+        self.build_tab.grid_columnconfigure(0, weight=1, minsize=ROSTER_PANEL_PX)
         # The form panel needs a firm width: its content is now a scroll canvas (which
         # requests no width of its own), and the coaching-type radios run two wide
         # columns. Without a minsize the column collapses and clips the right column.
-        self.grid_columnconfigure(1, weight=0, minsize=720)
+        self.build_tab.grid_columnconfigure(1, weight=0, minsize=720)
 
         self._build_roster_panel()
         self._build_group_panel()
         self._build_batch_bar()
+        self._build_report_tab()
         self._refresh_list()
         self._on_type_change()
         self._on_loc_mode()
@@ -541,12 +702,19 @@ class EncounterBuilder(tk.Tk):
         # Panel legends are the signage layer: display face, tracked-out caps, amber.
         # Tk has no letter-spacing, so the spacing is put into the string itself by
         # _legend() at each call site.
-        style.configure("TLabelframe.Label", background=UI_BG, foreground=UI_ACCENT,
+        style.configure("TLabelframe.Label", background=UI_BG, foreground=UI_ACCENT_TEXT,
                         font=legend)
         # Tallies and counts — Consolas keeps digits in columns as the number changes.
         style.configure("Data.TLabel", background=UI_BG, foreground=UI_CONFIRM,
                         font=FONT_DATA)
         style.configure("Muted.TLabel", background=UI_BG, foreground=UI_MUTED)
+        # Foldable section headers: the display face in accent, with the folded value
+        # beside it in muted body text so the two read as label-then-value, not as two
+        # competing headings.
+        style.configure("Section.TLabel", background=UI_BG, foreground=UI_ACCENT_TEXT,
+                        font=(_DISPLAY_FAMILY, 11))
+        style.configure("SectionValue.TLabel", background=UI_BG, foreground=UI_TEXT,
+                        font=("Segoe UI", 10))
 
         # Flat buttons with a thin border; hover tints toward the accent.
         style.configure("TButton", background=UI_CARD, foreground=UI_TEXT,
@@ -554,13 +722,13 @@ class EncounterBuilder(tk.Tk):
                         padding=(11, 5))
         style.map("TButton",
                   background=[("pressed", UI_ACCENT_SOFT), ("active", UI_ACCENT_SOFT)],
-                  bordercolor=[("active", UI_ACCENT), ("focus", UI_ACCENT)])
-        # A filled accent button for the primary action. Text on amber is slate — white
-        # on #F0A32B lands around 2:1 contrast and is unreadable at button sizes.
+                  bordercolor=[("active", UI_ACCENT_TEXT), ("focus", UI_ACCENT_TEXT)])
+        # A filled accent button for the primary action. Text on amber is white — the
+        # warm gray ground on #B8620A lands under 3:1 and is unreadable at button sizes.
         style.configure("Accent.TButton", background=UI_ACCENT, foreground=UI_ON_ACCENT,
                         bordercolor=UI_ACCENT, font=(_DISPLAY_FAMILY, 11))
         style.map("Accent.TButton",
-                  background=[("pressed", "#d18d1f"), ("active", "#ffb443")],
+                  background=[("pressed", UI_ACCENT_PRESS), ("active", UI_ACCENT_HOVER)],
                   foreground=[("disabled", UI_MUTED)])
 
         for w in ("TCheckbutton", "TRadiobutton"):
@@ -576,12 +744,12 @@ class EncounterBuilder(tk.Tk):
         style.map("Radio10.TCheckbutton", background=[("active", UI_BG)])
         style.configure("TEntry", fieldbackground=UI_CARD, bordercolor=UI_BORDER,
                         relief="solid", borderwidth=1, padding=5)
-        style.map("TEntry", bordercolor=[("focus", UI_ACCENT)])
+        style.map("TEntry", bordercolor=[("focus", UI_ACCENT_TEXT)])
         style.configure("TCombobox", fieldbackground=UI_CARD, background=UI_CARD,
                         bordercolor=UI_BORDER, arrowcolor=UI_TEXT, relief="solid",
                         borderwidth=1, padding=5, font=base)
         style.map("TCombobox", fieldbackground=[("readonly", UI_CARD)],
-                  bordercolor=[("focus", UI_ACCENT)])
+                  bordercolor=[("focus", UI_ACCENT_TEXT)])
         # Segmented control (the Groups / Individuals mode switch): radiobuttons drawn
         # as buttons, the selected one filled with the accent.
         style.configure("Toolbutton", background=UI_CARD, foreground=UI_MUTED,
@@ -589,8 +757,33 @@ class EncounterBuilder(tk.Tk):
                         padding=(14, 6), font=(_DISPLAY_FAMILY, 11))
         style.map("Toolbutton",
                   background=[("selected", UI_ACCENT), ("active", UI_ACCENT_SOFT)],
-                  foreground=[("selected", UI_ON_ACCENT), ("active", UI_ACCENT)],
+                  foreground=[("selected", UI_ON_ACCENT), ("active", UI_ACCENT_TEXT)],
                   bordercolor=[("selected", UI_ACCENT)])
+        # The tab strip (Build a batch / Case list report). Same grammar as the
+        # segmented control above: the accent marks the live one.
+        #
+        # ⚠️ The SELECTED tab is the CARD colour and the unselected ones are the
+        # ground, not the other way round. Written the intuitive way — selected sits
+        # "flush" on the ground, unselected lifted on the card — the unselected tab is
+        # the lighter of the two and reads as the active one. On a light theme the
+        # lifted surface is the foreground, so the selected tab has to be the lifted
+        # one; the amber alone does not out-shout a lightness difference.
+        #
+        # padding=0 so the tab page gets the window's full width. Measured, because the
+        # first guess at why was wrong: at 1180x700 the notebook's own inset costs 8px
+        # (1176 vs 1168 of usable width) and the roster panel sits at its 430px minsize
+        # either way — it asks for 1137. The roster panel's buttons clip at this window
+        # size with or without a notebook; that is the existing two-column layout, not
+        # something the tab strip introduced. The 8px is free, so take it.
+        style.configure("TNotebook", background=UI_BG, bordercolor=UI_BORDER,
+                        tabmargins=(8, 6, 0, 0), padding=0, borderwidth=0)
+        style.configure("TNotebook.Tab", background=UI_BG, foreground=UI_MUTED,
+                        bordercolor=UI_BORDER, padding=(18, 7),
+                        font=(_DISPLAY_FAMILY, 11))
+        style.map("TNotebook.Tab",
+                  background=[("selected", UI_CARD), ("active", UI_ACCENT_SOFT)],
+                  foreground=[("selected", UI_ACCENT_TEXT), ("active", UI_ACCENT_TEXT)],
+                  expand=[("selected", (0, 0, 0, 2))])
         style.configure("TSeparator", background=UI_BORDER)
         # The scrollbar is the one piece of chrome 'clam' draws with a visible trough;
         # sinking it into the ground keeps the slate unbroken.
@@ -696,7 +889,7 @@ class EncounterBuilder(tk.Tk):
     # ── left: filters + the roster ────────────
 
     def _build_roster_panel(self):
-        frame = ttk.LabelFrame(self, text=_legend("Who did you see?"), padding=6)
+        frame = ttk.LabelFrame(self.build_tab, text=_legend("Who did you see?"), padding=6)
         frame.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=(8, 0))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(1, weight=1)      # the inner content takes the height
@@ -770,8 +963,8 @@ class EncounterBuilder(tk.Tk):
                             command=self._on_filter_change).grid(
                                 row=i // 2, column=i % 2, sticky="w", padx=(0, 14))
 
-        ttk.Separator(frame, orient="horizontal").grid(row=3, column=0, sticky="ew",
-                                                       pady=6)
+        filter_sep = ttk.Separator(frame, orient="horizontal")
+        filter_sep.grid(row=3, column=0, sticky="ew", pady=6)
 
         find = ttk.Frame(frame)
         find.grid(row=4, column=0, sticky="ew", pady=(0, 4))
@@ -784,8 +977,10 @@ class EncounterBuilder(tk.Tk):
         self.find_entry = entry          # individual mode refocuses here after each add
         # Review the current pick: collapse the list to just who's checked.
         self.checked_only = tk.BooleanVar(value=False)
-        ttk.Checkbutton(find, text="checked only", variable=self.checked_only,
-                        command=self._refresh_list).pack(side="left", padx=(8, 0))
+        self.checked_only_box = ttk.Checkbutton(find, text="checked only",
+                                                variable=self.checked_only,
+                                                command=self._refresh_list)
+        self.checked_only_box.pack(side="left", padx=(8, 0))
 
         # Taller, roomier rows in a clean proportional font (was cramped monospace).
         wrap, self.listbox = self._scrolled_list(frame, font=("Segoe UI", 13), height=8)
@@ -826,6 +1021,17 @@ class EncounterBuilder(tk.Tk):
         # many names would break the "exactly one loaded" invariant).
         self._roster_group_only = [buttons, pick]
 
+        # Individual mode strips this panel to a search box and the roster, and nothing
+        # else (Dane, 2026-09-03). The filters above are all GROUP tools: you narrow a
+        # 261-name list to sweep an area or a shift. Picking one person is a different
+        # act — you already know who, so you type the name. Every filter left on screen
+        # is then a control that can only get in the way, and "shown / filtered out / on
+        # roster" is a tally of a list you are not working as a list.
+        #
+        # Kept on the grid in individual mode: the mode switch (you have to be able to
+        # leave), Find, and the name list.
+        self._roster_individual_hide = [shifts, head, areas, filter_sep]
+
         # justify: the two lines are left-aligned, not centred on each other.
         # wraplength: a backstop for the one unbounded part — an employee name in
         # individual mode. The longest real one measures 378px, but a longer hire
@@ -836,6 +1042,9 @@ class EncounterBuilder(tk.Tk):
         self.count_label.grid(row=8, column=0, sticky="w", pady=(4, 0))
         self.roster_hint = ttk.Label(frame, text="", foreground=UI_MUTED, wraplength=600)
         self.roster_hint.grid(row=9, column=0, sticky="w")
+        # The tally and the long hint go with the filters — see _roster_individual_hide.
+        # mode_hint, up beside the mode switch, still carries the one-line instruction.
+        self._roster_individual_hide += [self.count_label, self.roster_hint]
 
     # ── work-area (division) filter ────────────
 
@@ -865,6 +1074,12 @@ class EncounterBuilder(tk.Tk):
 
     def _visible(self, person):
         needle = self.filter_var.get().strip().lower()
+        # Individual mode: the search box is the ONLY filter. Its panel hides the
+        # area/shift/role controls, and a filter you cannot see is a filter you cannot
+        # undo — a name inside an area Dane has hidden between runs would simply never
+        # appear, with nothing on screen to explain why or turn back on.
+        if self.mode.get() == "individuals":
+            return needle in person["name"].lower()
         # Reviewing the pick: show EVERY checked person, even one a hidden area/shift
         # would otherwise drop — the point is to see the whole group before adding it.
         if self.checked_only.get():
@@ -1051,11 +1266,18 @@ class EncounterBuilder(tk.Tk):
                     padx=(0, 14), pady=1)
         return f
 
-    def _open_calendar(self):
-        """Pop a small month calendar to pick the encounter date — no typing."""
+    def _open_calendar(self, var=None):
+        """Pop a small month calendar to pick a date — no typing.
+
+        `var` is which StringVar to write MM/DD/YYYY into; it defaults to the
+        encounter date so the existing call sites are unchanged. The report tab passes
+        its own From/To vars, because a date that can be typed is a date that can be
+        typed wrong, and this picker is already the one place that cannot be.
+        """
+        var = var or self.date_var
         import calendar as _cal
         try:
-            cur = datetime.strptime(self.date_var.get().strip(), "%m/%d/%Y").date()
+            cur = datetime.strptime(var.get().strip(), "%m/%d/%Y").date()
         except Exception:
             cur = date.today()
         top = tk.Toplevel(self)
@@ -1073,7 +1295,7 @@ class EncounterBuilder(tk.Tk):
         grid.pack()
 
         def pick(d):
-            self.date_var.set(d.strftime("%m/%d/%Y"))
+            var.set(d.strftime("%m/%d/%Y"))
             top.destroy()
 
         def draw():
@@ -1113,13 +1335,14 @@ class EncounterBuilder(tk.Tk):
         draw()
         top.update_idletasks()
         top.geometry(f"+{self.winfo_rootx() + 300}+{self.winfo_rooty() + 120}")
+        return top          # so a test can drive it; callers ignore it
 
     def _build_group_panel(self):
         # Legend is the short form: tracked, "WHAT WAS THE ENCOUNTER?" measures 224px
         # against a ~402px column at the 860px minimum window, where the old full string
         # tracked would run 497px and squeeze the roster panel. The dropped
         # "(applies to everyone checked)" is already said by self.mode_hint.
-        outer = ttk.LabelFrame(self, text=_legend("What was the encounter?"),
+        outer = ttk.LabelFrame(self.build_tab, text=_legend("What was the encounter?"),
                                padding=(2, 2))
         outer.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=(8, 0))
         outer.grid_rowconfigure(0, weight=1)
@@ -1157,27 +1380,46 @@ class EncounterBuilder(tk.Tk):
         ttk.Button(datef, text="📅  Pick date",
                    command=self._open_calendar).pack(side="left", padx=(6, 0))
 
+        # ── the foldable blocks ──
+        # Each takes TWO grid rows (header, then body), so every `row` step below is +2.
+        self.sections = []
+
         row += 1
-        # Encounter type — radios, no dropdown.
-        ttk.Label(frame, text="Encounter type").grid(row=row, column=0, sticky="nw", pady=2)
+        # Encounter type — radios, no dropdown. Collapsed by default: it has a real
+        # default value and Dane changes it rarely, so it earns one line, not eight.
         self.etype_var = tk.StringVar(value=ace.ENCOUNTER_TYPES[0])
-        self._radios(frame, self.etype_var, ace.ENCOUNTER_TYPES, columns=2).grid(
-            row=row, column=1, sticky="w")
+        self.etype_section = self._section(frame, row, "Encounter type",
+                                           lambda: self.etype_var.get(), collapsed=True)
+        self._radios(self.etype_section.body, self.etype_var, ace.ENCOUNTER_TYPES,
+                     columns=2, command=self.etype_section.collapse).grid(
+            row=0, column=0, sticky="w")
 
-        row += 1
+        row += 2
         # Coaching type — ALL options as radios (Dane: no dropdown, no scrolling).
-        ttk.Label(frame, text="Coaching type").grid(row=row, column=0, sticky="nw", pady=2)
+        # Starts OPEN, unlike the rest: it is the one field with no default, a group will
+        # not build without it, and nothing here may guess it. An unset field that folds
+        # itself away is exactly the field you forget to set.
+        #
+        # SUGGEST_TYPE is the one exception, and it is not the tool guessing — it is Dane
+        # asking for a recommendation he then reads back. It sits last so the eleven real
+        # values are what the eye lands on first.
         self.type_var = tk.StringVar(value=PICK_ONE)
-        self._radios(frame, self.type_var, COACHING_TYPES, columns=2,
-                     command=self._on_type_change, font="small").grid(
-            row=row, column=1, sticky="w")
+        self.type_section = self._section(frame, row, "Coaching type",
+                                          lambda: self.type_var.get(), collapsed=False)
+        self._radios(self.type_section.body, self.type_var,
+                     COACHING_TYPES + [SUGGEST_TYPE], columns=2,
+                     command=self._pick_coaching_type, font="small").grid(
+            row=0, column=0, sticky="w")
 
-        row += 1
-        ttk.Label(frame, text="Details").grid(row=row, column=0, sticky="nw", pady=2)
-        self.details_frame = ttk.Frame(frame)
-        self.details_frame.grid(row=row, column=1, sticky="w")
+        row += 2
+        # Details — multi-select, so it folds on the accordion, never on a click. Opens
+        # by itself the moment a coaching type is picked, because that is the only point
+        # at which its boxes exist and it is the next thing to do.
+        self.details_section = self._section(frame, row, "Details",
+                                             self._details_summary, collapsed=True)
+        self.details_frame = self.details_section.body
 
-        row += 1
+        row += 2
         ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=2,
                                                        sticky="ew", pady=2)
 
@@ -1250,18 +1492,28 @@ class EncounterBuilder(tk.Tk):
                                      self.group_loc, self.loc_note]
 
         row += 1
-        ttk.Label(frame, text="Category").grid(row=row, column=0, sticky="nw", pady=2)
+        # Category — collapsed by default; it has a default value and rarely moves.
         self.cat_var = tk.StringVar(value=fm.CATEGORY_DEFAULT)
-        self._radios(frame, self.cat_var, ace.FIELD_OPTIONS.get("Category", []),
-                     columns=2).grid(row=row, column=1, sticky="w")
+        self.cat_section = self._section(frame, row, "Category",
+                                         lambda: self.cat_var.get(), collapsed=True)
+        self._radios(self.cat_section.body, self.cat_var,
+                     ace.FIELD_OPTIONS.get("Category", []), columns=2,
+                     command=self.cat_section.collapse).grid(row=0, column=0, sticky="w")
 
-        row += 1
-        ttk.Label(frame, text="Prompted by").grid(row=row, column=0, sticky="nw", pady=2)
+        row += 2
+        # Prompted by — folds after a pick. Left OPEN at startup: Dane asked for it to
+        # collapse on selection but did not ask for it to start folded, and it is the
+        # one remaining block where the default is worth seeing rather than trusting.
         self.prompted_var = tk.StringVar(value=ace.WHAT_PROMPTED_OPTIONS[0])
-        self._radios(frame, self.prompted_var, ace.WHAT_PROMPTED_OPTIONS,
-                     columns=2).grid(row=row, column=1, sticky="w")
+        self.prompted_section = self._section(frame, row, "Prompted by",
+                                              lambda: self.prompted_var.get(),
+                                              collapsed=False)
+        self._radios(self.prompted_section.body, self.prompted_var,
+                     ace.WHAT_PROMPTED_OPTIONS, columns=2,
+                     command=self.prompted_section.collapse).grid(
+            row=0, column=0, sticky="w")
 
-        row += 1
+        row += 2
         ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=2,
                                                        sticky="ew", pady=2)
 
@@ -1279,15 +1531,66 @@ class EncounterBuilder(tk.Tk):
             ttk.Label(head, text="(workbook not found — type the description)",
                       foreground=UI_MUTED).pack(side="left", padx=8)
 
+        # Ticked, the box below holds a NOTE — "hydration and magnesium" — not a
+        # description, and Claude turns it into one when the batch is written. One tick
+        # rather than a second box: the note goes where the description goes, and there
+        # is no note column in encounters.csv for it to be mistaken for a real one.
+        self.note_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(head, text="Note only — Claude writes it",
+                        variable=self.note_var,
+                        style="Radio10.TCheckbutton").pack(side="right")
+
         row += 1
         # Fixed height inside the scroll canvas — 5 lines is plenty for entry, and the
         # panel scrolls rather than collapsing this box when the form is tall.
         self.desc_text = tk.Text(frame, height=5, wrap="word", font=("Segoe UI", 11),
                                  bg=UI_CARD, fg=UI_TEXT, borderwidth=1, relief="solid",
                                  highlightthickness=1, highlightbackground=UI_BORDER,
-                                 highlightcolor=UI_ACCENT, padx=6, pady=6)
+                                 highlightcolor=UI_ACCENT_TEXT, padx=6, pady=6)
         self.desc_text.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=4)
         frame.grid_columnconfigure(1, weight=1)
+
+    # ── foldable form sections ────────────────
+
+    def _section(self, parent, row, label, summary, collapsed):
+        """Build a CollapsibleSection wired into this window's accordion."""
+        sec = CollapsibleSection(parent, row, label, summary, collapsed=collapsed,
+                                 on_expand=self._section_opened)
+        self.sections.append(sec)
+        return sec
+
+    def _section_opened(self, opened):
+        """Accordion: opening one block folds every other one."""
+        for sec in self.sections:
+            if sec is not opened and not sec.collapsed:
+                sec.collapse()
+
+    def _details_summary(self):
+        """What the folded Details header shows.
+
+        Names the picks rather than counting them — 'Hydration, Rest break' is what you
+        are checking for when you glance at a folded form; '2 selected' would make you
+        open it again to find out whether it is the right two.
+        """
+        if self.type_var.get() == PICK_ONE:
+            return "—"
+        picked = [n for n, v in self.detail_vars.items() if v.get()]
+        if not picked:
+            return "none" if self.detail_vars else "no details for this type"
+        text = ", ".join(picked)
+        return text if len(text) <= 58 else f"{text[:55]}…"
+
+    def _pick_coaching_type(self):
+        """A coaching type was clicked: rebuild its details, fold this, open those.
+
+        The hand-off is the point. Picking a type is never the end of a thought — the
+        details belong to the type and are the only thing that can be done next, so the
+        form moves there rather than leaving Dane to notice a block that just refilled
+        itself further down the panel.
+        """
+        self._on_type_change()
+        self.type_section.collapse()
+        self.details_section.expand()
 
     def _on_loc_mode(self):
         per_employee = self.loc_mode.get() == "per_employee"
@@ -1328,12 +1631,23 @@ class EncounterBuilder(tk.Tk):
         if chosen == PICK_ONE:
             ttk.Label(self.details_frame, text="(pick a coaching type first)",
                       foreground=UI_MUTED).grid(row=0, column=0, sticky="w")
+            self.details_section.refresh()
+            return
+
+        if chosen == SUGGEST_TYPE:
+            # The boxes belong to the type, and the type isn't known yet — so there is
+            # nothing here that could be ticked. Dane ticks them in the EMR either way.
+            ttk.Label(self.details_frame,
+                      text="(no boxes until the type is known — you tick them in the EMR)",
+                      foreground=UI_MUTED).grid(row=0, column=0, sticky="w")
+            self.details_section.refresh()
             return
 
         options = sorted(ace.CHECKBOX_UUID_MAP.get(chosen, {}))
         if not options:
             ttk.Label(self.details_frame, text="(this type has no details)",
                       foreground=UI_MUTED).grid(row=0, column=0, sticky="w")
+            self.details_section.refresh()
             return
 
         # Long detail labels (some Group Class ones run 40+ chars) stay 2-up; short sets
@@ -1344,8 +1658,10 @@ class EncounterBuilder(tk.Tk):
             var = tk.BooleanVar()
             self.detail_vars[name] = var
             ttk.Checkbutton(self.details_frame, text=name, variable=var,
-                            style="Radio10.TCheckbutton").grid(
+                            style="Radio10.TCheckbutton",
+                            command=self.details_section.refresh).grid(
                 row=i // cols, column=i % cols, sticky="w", padx=(0, 12))
+        self.details_section.refresh()
 
     def _resolve_area(self):
         dept, div = fm.resolve(self.area_var.get())
@@ -1425,6 +1741,12 @@ class EncounterBuilder(tk.Tk):
             ticked = details_from_hint(entry["hint"], list(self.detail_vars))
             for name in ticked:
                 self.detail_vars[name].set(True)
+            # The library just set the type and ticked boxes on Dane's behalf. Fold the
+            # type block (it is settled) and re-read the details header, so the folded
+            # form shows what the pick actually did rather than what it said a moment ago.
+            if auto_ct:
+                self.type_section.collapse()
+            self.details_section.refresh()
             win.destroy()
             note = []
             if auto_ct:
@@ -1456,7 +1778,7 @@ class EncounterBuilder(tk.Tk):
                 head.columnconfigure(0, weight=1)
                 tk.Label(head, text=e["label"] or e["tab"], bg=UI_CARD, fg=UI_TEXT,
                          font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-                tk.Label(head, text=e["tab"], bg=UI_ACCENT_SOFT, fg=UI_ACCENT,
+                tk.Label(head, text=e["tab"], bg=UI_ACCENT_SOFT, fg=UI_ACCENT_TEXT,
                          font=("Segoe UI", 9), padx=8, pady=2).grid(
                     row=0, column=1, sticky="e", padx=8)
                 ttk.Button(head, text="Use", width=7, style="Accent.TButton",
@@ -1488,7 +1810,7 @@ class EncounterBuilder(tk.Tk):
         """The three buttons that finish the job. Pinned to the bottom row, which has
         no weight — it keeps its height however small the window gets, so these can
         never be pushed off-screen the way a fixed-size window pushed them off."""
-        frame = ttk.Frame(self, padding=(8, 6))
+        frame = ttk.Frame(self.build_tab, padding=(8, 6))
         frame.grid(row=1, column=0, columnspan=2, sticky="ew")
         frame.grid_columnconfigure(0, weight=1)
 
@@ -1768,7 +2090,11 @@ class EncounterBuilder(tk.Tk):
                 return None
         description = self.desc_text.get("1.0", "end-1c").strip()
         if not description:
-            messagebox.showwarning("Description", "Write or pick a description first.")
+            messagebox.showwarning(
+                "Description",
+                "Say what the note is about first — a topic is enough."
+                if self.note_var.get() else
+                "Write or pick a description first.")
             return None
         details = "; ".join(sorted(n for n, v in self.detail_vars.items() if v.get()))
         return raw_date, details, description
@@ -1803,11 +2129,13 @@ class EncounterBuilder(tk.Tk):
         where = "per employee" if per_employee else (self.dept_var.get() or "no dept")
         self.groups.append({
             "rows": rows,
+            "pending": self._group_pending(description),
             "label": (f"{len(rows):>3} people  ·  {self.type_var.get()}"
                       f"{'  ·  ' + details if details else ''}"
                       f"  ·  {raw_date or 'today'}  ·  {where}"),
         })
         self._clear_all()
+        self.note_var.set(False)
         self._update_batch()
 
     def _add_single(self):
@@ -1827,15 +2155,19 @@ class EncounterBuilder(tk.Tk):
         row = self._make_row(name, raw_date, details, description, per_employee=True)
         self.groups.append({
             "rows": [row],
+            "pending": self._group_pending(description),
             "label": (f"  1 person  ·  {self.type_var.get()}"
                       f"{'  ·  ' + details if details else ''}"
                       f"  ·  {raw_date or 'today'}  ·  {name}"),
         })
         # Reset only the per-person bits; leave the carried-forward fields alone.
+        # The note switch belongs to the description, so it resets with it.
         self.checked.clear()
+        self.note_var.set(False)
         self.desc_text.delete("1.0", tk.END)
         for v in self.detail_vars.values():
             v.set(False)
+        self.details_section.refresh()     # the folded header must not show last person's
         self.filter_var.set("")            # clear the search so the next name types fresh
         self._refresh_list()
         self._update_batch()
@@ -1844,6 +2176,11 @@ class EncounterBuilder(tk.Tk):
     def _on_mode(self):
         """Switch the panels between the entry modes."""
         mode = self.mode.get()
+        # The filter block is group machinery — restore it for every mode but individuals.
+        if mode != "individuals":
+            for w in self._roster_individual_hide:
+                w.grid()
+            self.checked_only_box.pack(side="left", padx=(8, 0))
         if mode == "pool":
             # Roll call first: the roster panel keeps its bulk-check controls (you are
             # checking many people), but the encounter form is for the SUBSET you pick
@@ -1872,8 +2209,12 @@ class EncounterBuilder(tk.Tk):
             # per-employee and hide the location chooser and the bulk-check controls.
             self.loc_mode.set("per_employee")
             self._on_loc_mode()
-            for w in self._loc_section_widgets + self._roster_group_only:
+            for w in (self._loc_section_widgets + self._roster_group_only
+                      + self._roster_individual_hide):
                 w.grid_remove()
+            # 'checked only' is packed, not gridded, so it needs its own manager's forget.
+            self.checked_only.set(False)
+            self.checked_only_box.pack_forget()
             if len(self.checked) > 1:       # individual mode holds exactly one
                 self.checked.clear()
             self.add_btn.config(text="Add & Next", command=self._add_single)
@@ -2028,6 +2369,11 @@ class EncounterBuilder(tk.Tk):
         # encounter, not a second one living in this window.
         self.type_var.set(self.pool_type.get())
         self._on_type_change()
+        # The type came from the pool window, so the main form's type block is already
+        # settled — fold it and open Details, which is what the popup below tells him to
+        # go and fill in.
+        self.type_section.collapse()
+        self.details_section.expand()
         self.pool_win.withdraw()
         messagebox.showinfo(
             "Finish this encounter",
@@ -2057,6 +2403,7 @@ class EncounterBuilder(tk.Tk):
                 for n in picks]
         self.groups.append({
             "rows": rows,
+            "pending": self._group_pending(description),
             "label": (f"{len(rows):>3} people  ·  {self.type_var.get()}"
                       f"{'  ·  ' + details if details else ''}"
                       f"  ·  {raw_date or 'today'}  ·  from shift pool"),
@@ -2066,6 +2413,7 @@ class EncounterBuilder(tk.Tk):
                 self.pool.remove(n)
         self._pending_pool = None
         self.checked.clear()
+        self.note_var.set(False)
         self.desc_text.delete("1.0", tk.END)
         for v in self.detail_vars.values():
             v.set(False)
@@ -2130,6 +2478,9 @@ class EncounterBuilder(tk.Tk):
         """
         rows = group["rows"]
         r0 = rows[0]
+        spec = group.get("pending") or {}
+        waiting = [w for w, on in (("description", spec.get("description")),
+                                   ("coaching type", spec.get("coaching_type"))) if on]
         depts = {r["department"] or "—" for r in rows}
         shifts = {r["shift"] or "—" for r in rows}
         where = next(iter(depts)) if len(depts) == 1 else "per employee"
@@ -2144,6 +2495,9 @@ class EncounterBuilder(tk.Tk):
             "prompted": r0["what_prompted"],
             "details": r0["details"],
             "description": r0["description"],
+            "note_only": bool(spec.get("description")),
+            "pending": ("Claude writes the " + " and the ".join(waiting)
+                        + " when you write the batch" if waiting else ""),
             "where": where,
             "shift": shift,
         }
@@ -2229,9 +2583,18 @@ class EncounterBuilder(tk.Tk):
                          wraplength=WRAP, justify="left", font=("Segoe UI", 10)).grid(
                     row=2, column=0, sticky="w", pady=(4, 0))
 
-            tk.Label(card, text=s["description"], bg=UI_CARD, fg=UI_TEXT, wraplength=WRAP,
+            tk.Label(card,
+                     text=(f"Note:  {s['description']}" if s["note_only"]
+                           else s["description"]),
+                     bg=UI_CARD, fg=UI_TEXT, wraplength=WRAP,
                      justify="left", font=("Segoe UI", 11)).grid(
                 row=3, column=0, sticky="w", pady=(6, 2))
+
+            if s["pending"]:
+                tk.Label(card, text="⌛  " + s["pending"], bg=UI_CARD,
+                         fg=UI_ACCENT_TEXT, wraplength=WRAP, justify="left",
+                         font=("Segoe UI", 10, "bold")).grid(
+                    row=5, column=0, sticky="w", pady=(6, 0))
 
             tk.Label(card, text="Who:  " + "   ".join(s["names"]), bg=UI_CARD,
                      fg=CHECK_FG, wraplength=WRAP, justify="left",
@@ -2252,9 +2615,265 @@ class EncounterBuilder(tk.Tk):
                 parent=self.review_win):
             self._delete_group(index)
 
+    # ── notes → descriptions ──────────────────
+    #
+    # The only place this tool talks to anything but the EMR. Dane types what he wants
+    # said — "hydration and magnesium" — ticks "Note only", and at write time the whole
+    # batch goes out in ONE headless `claude -p` call (cost tracks invocations, not rows:
+    # the measurement is in intake_runner's docstring).
+    #
+    # WHAT CROSSES THE LINE
+    #     A job is the note, how many people the group covers, and the coaching type.
+    #     No name, no date, no department, no shift, no identifier. The map from a job
+    #     back to the people in it is the group's position in this list and it never
+    #     leaves the process. Nothing here is a new exception to the PHI boundary — it is
+    #     ENCOUNTER_INTAKE.md's de-identified handover with the spreadsheet taken out.
+    #
+    # WHAT COMES BACK IS NOT TRUSTED
+    #     A suggested coaching type is checked against COACHING_TYPE_UUIDS before it can
+    #     reach a row. Detail checkboxes, encounter type, category, department and shift
+    #     are never asked for and never accepted: Dane sets those himself.
+
+    _NAME_MIN = 3
+
+    def _roster_name_tokens(self):
+        """Every name part on the loaded roster, lowercased.
+
+        An allowlist of REAL names, not a pattern for name-shaped words. A regex would
+        wave through the one surname that mattered and trip on "Rest"; this can only
+        ever be wrong about words that genuinely are somebody's name.
+        """
+        tokens = set()
+        for full in self.by_name:
+            for part in re.split(r"[^A-Za-z]+", full):
+                if len(part) >= self._NAME_MIN:
+                    tokens.add(part.lower())
+        return tokens
+
+    def _notes_naming_people(self, pending):
+        """(group index, the word) for every note carrying a roster name.
+
+        ENCOUNTER_INTAKE.md concedes that Claude cannot make this check — by the time it
+        could look, it has already read the note. In here it can: the roster is in memory
+        and the check happens before anything is sent. The word is shown because this is
+        Dane's screen and the roster is already on it, and because seeing it is what makes
+        a surname that is also an ordinary word obvious in one glance.
+        """
+        tokens = self._roster_name_tokens()
+        hits = []
+        for idx, group in pending:
+            for word in re.findall(r"[A-Za-z][A-Za-z'\-]*",
+                                   group["pending"]["note"]):
+                if len(word) >= self._NAME_MIN and word.lower() in tokens:
+                    hits.append((idx, word))
+                    break
+        return hits
+
+    def _group_pending(self, description):
+        """What still has to be written for the group being added, or None.
+
+        Group-level, never row-level. The row dicts ARE the CSV rows — DictWriter is
+        built from ace.CSV_COLUMNS — so an extra key on a row would either raise or
+        invent a column the EMR has never heard of. This dies with the batch.
+        """
+        needs_desc = bool(self.note_var.get())
+        needs_type = self.type_var.get() == SUGGEST_TYPE
+        if not (needs_desc or needs_type):
+            return None
+        return {"note": description, "description": needs_desc,
+                "coaching_type": needs_type}
+
+    def _library_examples(self, coaching_type, limit=4):
+        """Real descriptions already in use, sent as the scale to write to.
+
+        The workbook is the measurement; a rubric written from scratch would be a guess
+        about what a coaching type's description should cover. For a known type they come
+        from that type's own tab. For a suggestion there is no tab yet, so a thin spread
+        across tabs carries the voice without implying a category.
+        """
+        if not self.library:
+            return []
+        tabs = sorted({e["tab"] for e in self.library})
+        if coaching_type:
+            tab = library_category_for(coaching_type, tabs)
+            if not tab:
+                return []
+            return [e["text"] for e in self.library if e["tab"] == tab][:limit]
+        seen, spread = set(), []
+        for entry in self.library:
+            if entry["tab"] in seen:
+                continue
+            seen.add(entry["tab"])
+            spread.append(entry["text"])
+            if len(spread) >= 8:
+                break
+        return spread
+
+    def _run_with_progress(self, jobs, options):
+        """Run the batch on a worker thread. Returns the results, or None after showing
+        why it failed.
+
+        Threaded because the call is a subprocess that can run for minutes and a frozen
+        window reads as a crash. Tk must not be touched from the worker, so progress
+        comes back over a queue and is drawn here.
+        """
+        try:
+            import intake_runner
+        except Exception as exc:        # not installed, or broken — say so, write nothing
+            messagebox.showerror(
+                "Nothing was written",
+                f"intake_runner.py could not be loaded, so the notes could not be "
+                f"turned into descriptions and encounters.csv was left exactly as it "
+                f"was.\n\n{exc}")
+            return None
+
+        win = tk.Toplevel(self)
+        win.title("Writing descriptions")
+        win.configure(bg=UI_BG)
+        win.resizable(False, False)
+        win.transient(self)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)   # not closable mid-call
+        tk.Label(win, text="Writing the descriptions…", bg=UI_BG, fg=UI_TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(padx=26, pady=(20, 2))
+        tk.Label(win, text=f"{len(jobs)} group(s), one call.", bg=UI_BG, fg=UI_MUTED,
+                 font=("Segoe UI", 10)).pack(padx=26)
+        status = tk.Label(win, text="Starting…", bg=UI_BG, fg=UI_MUTED, width=46,
+                          font=("Segoe UI", 10))
+        status.pack(padx=26, pady=(8, 0))
+        bar = ttk.Progressbar(win, mode="indeterminate", length=330)
+        bar.pack(padx=26, pady=(8, 22))
+        bar.start(12)
+        win.update_idletasks()
+        win.geometry("+%d+%d" % (
+            self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2,
+            self.winfo_rooty() + (self.winfo_height() - win.winfo_height()) // 3))
+        win.grab_set()
+
+        box = queue.Queue()
+
+        def work():
+            try:
+                box.put(("done", intake_runner.run_coaching(
+                    jobs, options, on_progress=lambda m: box.put(("msg", m)))))
+            except Exception as exc:        # RunnerError, or anything unforeseen
+                box.put(("fail", exc))
+
+        threading.Thread(target=work, daemon=True).start()
+
+        out = {}
+
+        def poll():
+            try:
+                while True:
+                    kind, payload = box.get_nowait()
+                    if kind == "msg":
+                        status.config(text=payload)
+                        continue
+                    out["kind"], out["payload"] = kind, payload
+                    win.destroy()
+                    return
+            except queue.Empty:
+                pass
+            win.after(120, poll)
+
+        win.after(120, poll)
+        self.wait_window(win)
+
+        if out.get("kind") != "done":
+            messagebox.showerror(
+                "Nothing was written",
+                f"The descriptions could not be written, so encounters.csv was left "
+                f"exactly as it was.\n\n{out.get('payload')}")
+            return None
+        return out["payload"]
+
+    def _resolve_pending(self):
+        """Turn every note into a description and every suggestion into an EMR value.
+
+        Returns True when the batch is ready to write. A batch is ALL-OR-NOTHING here:
+        if one job comes back short, nothing is written. A note is not a description and
+        the sentinel is not a coaching type, and neither of them belongs in a medical
+        record because a run was half successful. Groups that did resolve keep their
+        text, so pressing Write again re-sends only what is still outstanding.
+        """
+        pending = [(i, g) for i, g in enumerate(self.groups) if g.get("pending")]
+        if not pending:
+            return True
+
+        hits = self._notes_naming_people(pending)
+        if hits and not messagebox.askyesno(
+                "A note has a name in it",
+                "These notes contain a word that is also a name on the roster:\n\n"
+                + "\n".join(f"      Group {i + 1} — \u201c{w}\u201d" for i, w in hits)
+                + "\n\nThe note is the only thing that gets sent — the names in the "
+                  "batch never leave this window. If one of those words is a person, "
+                  "cancel and reword the note.\n\nSend anyway?",
+                icon="warning"):
+            return False
+
+        jobs = []
+        for i, group in pending:
+            spec = group["pending"]
+            chosen = group["rows"][0]["coaching_type"]
+            jobs.append({
+                "ref": i + 1,
+                "note": spec["note"],
+                "people": len(group["rows"]),
+                "write_description": spec["description"],
+                "suggest_type": spec["coaching_type"],
+                "coaching_type": "" if spec["coaching_type"] else chosen,
+                "examples": self._library_examples(
+                    None if spec["coaching_type"] else chosen),
+            })
+
+        results = self._run_with_progress(jobs, COACHING_TYPES)
+        if results is None:
+            return False
+
+        short = []
+        for i, group in pending:
+            spec = group["pending"]
+            item = results.get(i + 1) or {}
+            desc = (item.get("description") or "").strip()
+            ctype = (item.get("coaching_type") or "").strip()
+
+            if spec["description"] and not desc:
+                short.append((i, "no description came back"))
+                continue
+            if spec["coaching_type"] and ctype not in ace.COACHING_TYPE_UUIDS:
+                short.append((i, "it could not settle on a coaching type" if not ctype
+                              else "the coaching type it gave is not an EMR value"))
+                continue
+
+            for row in group["rows"]:
+                if spec["description"]:
+                    row["description"] = desc
+                if spec["coaching_type"]:
+                    row["coaching_type"] = ctype
+            if spec["coaching_type"]:
+                group["label"] = group["label"].replace(SUGGEST_TYPE, ctype)
+            group["pending"] = None
+
+        self._update_batch()
+
+        if short:
+            messagebox.showerror(
+                "Nothing was written",
+                "These groups came back incomplete, so encounters.csv was left "
+                "exactly as it was:\n\n"
+                + "\n".join(f"      Group {i + 1} — {why}" for i, why in short)
+                + "\n\nFill them in yourself, or reword the note and press Write "
+                  "again — only the outstanding ones get sent.")
+            return False
+        return True
+
     def _write_csv(self):
         if not self.batch:
             messagebox.showwarning("Empty batch", "Add a group first.")
+            return
+        # Notes become descriptions and suggested types become EMR values HERE, before
+        # the file exists. If any of it fails, encounters.csv is left exactly as it was.
+        if not self._resolve_pending():
             return
         if os.path.exists(OUT_CSV):
             replaced = sum(1 for _ in open(OUT_CSV, encoding="utf-8-sig")) - 1
@@ -2310,6 +2929,272 @@ class EncounterBuilder(tk.Tk):
                 "Couldn't start it",
                 f"{exc}\n\nencounters.csv is written and fine — run it yourself:\n"
                 f"    .\\Run-Encounters.ps1")
+
+    # ─────────────────────────────────────────
+    # CASE LIST REPORT TAB
+    # ─────────────────────────────────────────
+
+    def _build_report_tab(self):
+        """Pick a date range, pick a format, get a report of what's already in the EMR.
+
+        The reverse direction from the rest of this window: everything else puts
+        encounters IN, this reads them back out. It runs READ-ONLY (see case_report),
+        and like the batch entry it goes out to its own console process — the browser
+        pauses on Windows dialogs for login and worksite, and those want a real
+        terminal behind them, not a frozen Tk window.
+        """
+        tab = self.report_tab
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)          # the note block takes the slack
+
+        today = date.today()
+        self.rep_from = tk.StringVar(value=today.replace(day=1).strftime("%m/%d/%Y"))
+        self.rep_to = tk.StringVar(value=today.strftime("%m/%d/%Y"))
+        self.rep_format = tk.StringVar(value="xlsx")
+
+        # ── dates ──
+        dates = ttk.LabelFrame(tab, text=_legend("Which dates?"), padding=(10, 8))
+        dates.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 6))
+
+        line = ttk.Frame(dates)
+        line.grid(row=0, column=0, sticky="w")
+        for i, (label, var) in enumerate((("From", self.rep_from), ("To", self.rep_to))):
+            ttk.Label(line, text=label).pack(side="left", padx=(0 if i == 0 else 22, 6))
+            ent = ttk.Entry(line, textvariable=var, width=12, state="readonly")
+            ent.pack(side="left")
+            ent.bind("<Button-1>", lambda e, v=var: self._open_calendar(v))
+            ttk.Button(line, text="📅", width=4,
+                       command=lambda v=var: self._open_calendar(v)).pack(side="left",
+                                                                          padx=(6, 0))
+        ttk.Label(dates, text="Both ends are included. The date used is the "
+                              "Date of Encounter on the record.",
+                  foreground=UI_MUTED).grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        quick = ttk.Frame(dates)
+        quick.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(quick, text="Quick:").pack(side="left", padx=(0, 8))
+        for label, span in (("This week", "this_week"), ("Last week", "last_week"),
+                            ("This month", "this_month"), ("Last month", "last_month"),
+                            ("Today", "today")):
+            ttk.Button(quick, text=label,
+                       command=lambda s=span: self._report_preset(s)).pack(side="left",
+                                                                           padx=(0, 4))
+
+        # ── format ──
+        fmt = ttk.LabelFrame(tab, text=_legend("What should it be?"), padding=(10, 8))
+        fmt.grid(row=1, column=0, sticky="ew", padx=8, pady=6)
+        row = ttk.Frame(fmt)
+        row.grid(row=0, column=0, sticky="w")
+        ttk.Label(row, text="File:").pack(side="left", padx=(0, 10))
+        for label, val in (("Excel (.xlsx)", "xlsx"), ("Word (.docx)", "docx"),
+                           ("Both", "both")):
+            ttk.Radiobutton(row, text=label, value=val, variable=self.rep_format,
+                            style="Radio10.TRadiobutton").pack(side="left", padx=(0, 16))
+        ttk.Label(fmt, text="Grouped by date, then case type, then coaching type — "
+                            "names alphabetised inside each group.\n"
+                            "Excel also gets a flat, filterable sheet and a summary "
+                            "of the counts.",
+                  foreground=UI_MUTED, justify="left").grid(row=1, column=0, sticky="w",
+                                                            pady=(6, 0))
+
+        # ── whose cases ──
+        # Not optional. The EMR mixes other specialists' cases into the list, out of
+        # order, and that is what made the 2026-09-08 run walk forever — the reader
+        # ticks this name in the Specialists filter before it reads anything.
+        who = ttk.Frame(fmt)
+        who.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(who, text="Specialist:").pack(side="left", padx=(0, 10))
+        self.rep_specialist = tk.StringVar(value=load_specialist())
+        ttk.Entry(who, textvariable=self.rep_specialist, width=28).pack(side="left")
+        ttk.Label(who, text="as the EMR's Specialists filter spells it — remembered "
+                            "between runs",
+                  foreground=UI_MUTED).pack(side="left", padx=(10, 0))
+
+        # ── actions ──
+        bar = ttk.Frame(tab, padding=(8, 4))
+        bar.grid(row=2, column=0, sticky="ew")
+        ttk.Button(bar, text="Build the report", style="Accent.TButton",
+                   command=self._run_report).pack(side="left")
+        # The finished file opens itself, but a run from an earlier day is otherwise a
+        # trip into the project folder to find — which is exactly what Dane didn't want
+        # (2026-09-08). This reopens the newest one without leaving the window.
+        self.rep_open_btn = ttk.Button(bar, text="Open last report",
+                                       command=self._open_last_report)
+        self.rep_open_btn.pack(side="left", padx=8)
+        ttk.Button(bar, text="Capture the page (read-only)",
+                   command=self._capture_case_list).pack(side="left")
+        self.rep_status = ttk.Label(bar, text="", foreground=UI_ACCENT_TEXT)
+        self.rep_status.pack(side="left", padx=12)
+        self._refresh_last_report()
+        # The run happens in another process, so this window never hears that a file
+        # appeared. Re-checking whenever the tab is opened is enough: coming back to
+        # this tab is exactly when you'd reach for the button.
+        self.book.bind("<<NotebookTabChanged>>",
+                       lambda e: self._refresh_last_report(), add="+")
+
+        # ── the standing notes ──
+        # ⚠️ HEIGHT BUDGET. _fit_to_screen gives this window 700px on Dane's 1280x800
+        # desktop, not the 780 a wider screen shows — so anything packed at the bottom
+        # of this tab has ~80px less room than it looks like it has while developing.
+        # The capture warning is the one thing here that must never be the piece that
+        # falls off the edge, so it goes FIRST, directly under the buttons, and the
+        # bullets (which only restate what the tab already does) take the squeeze.
+        note = ttk.Frame(tab, padding=(14, 4))
+        note.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+
+        if not case_report.PARSER_READY:
+            tk.Label(note,
+                     text="⚠  The Case List page has not been captured yet, so the "
+                          "report cannot read it. Click “Capture the page” once — it "
+                          "opens the page read-only and saves a scrubbed copy to "
+                          "./debug — then Claude finishes the reader from what the "
+                          "page actually says. Nothing is guessed at.",
+                     bg=UI_ACCENT_SOFT, fg=UI_ACCENT_TEXT, justify="left",
+                     wraplength=1000, anchor="w", font=("Segoe UI", 10),
+                     padx=10, pady=8).pack(anchor="w", fill="x", pady=(0, 8))
+
+        for text, colour in (
+                ("A browser opens on your screen and pauses for you to log in and "
+                 "confirm the worksite — same as entering a batch.", UI_TEXT),
+                ("Nothing is written back to the EMR. It opens the Case List, reads "
+                 "it, and closes.", UI_TEXT),
+                ("It pages back from today until it passes your From date, 30 rows a "
+                 "page — so an older range takes longer than a recent one. The console "
+                 "shows each page as it goes.", UI_TEXT),
+                ("Coaching type isn't shown on the Case List, so that level comes out "
+                 "blank. Case type (the coloured chip) is there.", UI_MUTED),
+                ("The file lands in the project folder as "
+                 "case_report_<from>_to_<to>.xlsx / .docx. It has real names on it, "
+                 "so it is gitignored and stays on this PC.", UI_MUTED)):
+            tk.Label(note, text="•  " + text, bg=UI_BG, fg=colour, justify="left",
+                     wraplength=1000, anchor="w", font=("Segoe UI", 10)
+                     ).pack(anchor="w", pady=(0, 4))
+
+    def _report_preset(self, span):
+        """Fill From/To from a named span. Weeks start Monday, like the plant's."""
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        if span == "today":
+            start = end = today
+        elif span == "this_week":
+            start, end = monday, today
+        elif span == "last_week":
+            start, end = monday - timedelta(days=7), monday - timedelta(days=1)
+        elif span == "this_month":
+            start, end = today.replace(day=1), today
+        else:                                    # last_month
+            first = today.replace(day=1)
+            end = first - timedelta(days=1)
+            start = end.replace(day=1)
+        self.rep_from.set(start.strftime("%m/%d/%Y"))
+        self.rep_to.set(end.strftime("%m/%d/%Y"))
+
+    def _report_range(self):
+        """The chosen range as (start, end), or None after showing why not."""
+        start = case_report.parse_date(self.rep_from.get())
+        end = case_report.parse_date(self.rep_to.get())
+        if not start or not end:
+            messagebox.showerror("Dates", "Pick a From and a To date.")
+            return None
+        if end < start:
+            start, end = end, start
+            self.rep_from.set(start.strftime("%m/%d/%Y"))
+            self.rep_to.set(end.strftime("%m/%d/%Y"))
+        return start, end
+
+    @staticmethod
+    def _console_python():
+        """python.exe, even when this window was launched by pythonw.exe.
+
+        pythonw has no console, and a child started from it inherits that — the report
+        run would print its progress into nowhere. Same class of bug as _enter_now's
+        reason for spawning a real terminal.
+        """
+        exe = sys.executable or "python"
+        base = os.path.basename(exe).lower()
+        if base.startswith("pythonw"):
+            candidate = os.path.join(os.path.dirname(exe), base.replace("pythonw", "python", 1))
+            if os.path.exists(candidate):
+                return candidate
+        return exe
+
+    def _launch_case_report(self, args, status):
+        """Run case_report.py in its own PowerShell window (-NoExit keeps the log)."""
+        script = os.path.join(_HERE, "case_report.py")
+        quoted = " ".join(f"'{a}'" for a in [self._console_python(), script] + list(args))
+        try:
+            subprocess.Popen(
+                ["powershell", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command",
+                 "& " + quoted],
+                cwd=_HERE,
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+            self.rep_status.config(text=status)
+        except Exception as exc:
+            messagebox.showerror(
+                "Couldn't start it",
+                f"{exc}\n\nRun it yourself:\n\n    python case_report.py "
+                + " ".join(args))
+
+    def _refresh_last_report(self):
+        """Grey the Open button out when there's nothing to open yet.
+
+        Only ever asks for a filename and an mtime — the report is PHI and this window
+        never reads inside it, it just hands the path to Windows.
+        """
+        latest = case_report.newest_report()
+        self.rep_open_btn.config(state="normal" if latest else "disabled")
+        return latest
+
+    def _open_last_report(self):
+        latest = self._refresh_last_report()
+        if not latest:
+            messagebox.showinfo(
+                "Nothing yet",
+                "No report has been built yet. Pick a date range and click "
+                "'Build the report' — the file opens itself when it's done.")
+            return
+        if not case_report.open_file(latest):
+            messagebox.showerror(
+                "Couldn't open it",
+                f"The file is here, Windows just wouldn't open it:\n\n{latest}")
+            return
+        self.rep_status.config(text=f"Opened {os.path.basename(latest)}")
+
+    def _capture_case_list(self):
+        self._launch_case_report(
+            ["--capture"],
+            "Capture running in its own window — read-only.")
+
+    def _run_report(self):
+        rng = self._report_range()
+        if not rng:
+            return
+        start, end = rng
+        if not case_report.PARSER_READY:
+            if messagebox.askyesno(
+                    "Capture it first",
+                    "The Case List page hasn't been captured yet, so there is no "
+                    "measured markup to read it with — and guessing at the layout is "
+                    "exactly how a wrong row ends up in a report.\n\n"
+                    "Run the read-only capture now? It opens the page, saves a "
+                    "scrubbed copy to ./debug, and changes nothing."):
+                self._capture_case_list()
+            return
+        who = self.rep_specialist.get().strip()
+        if not who:
+            messagebox.showerror(
+                "Whose cases?",
+                "Put your name in the Specialist box first — exactly as the EMR's "
+                "Specialists filter spells it.\n\n"
+                "Without it the Case List mixes in other specialists' cases, out of "
+                "date order, and the run walks thousands of pages instead of stopping "
+                "at your date range.")
+            return
+        save_specialist(who)
+        self._launch_case_report(
+            ["--from", start.strftime("%m/%d/%Y"), "--to", end.strftime("%m/%d/%Y"),
+             "--format", self.rep_format.get(), "--specialist", who],
+            f"Reading {start:%m/%d} – {end:%m/%d} — the file opens itself when it's done.")
 
 
 # ─────────────────────────────────────────────
