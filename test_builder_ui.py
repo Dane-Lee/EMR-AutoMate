@@ -274,6 +274,84 @@ check("the tab reaches the same range parser the reader uses",
       eb.case_report.parse_date("09/02/2026") == eb.date(2026, 9, 2))
 
 
+print("\nRelationship Development starts on Current Employee (item 1, 2026-09-10)")
+app.type_var.set("Relationship Development Encounter")
+app._on_type_change()
+check("Current Employee is ticked by default",
+      app.detail_vars["Current Employee"].get() is True)
+check("New Hire is not", app.detail_vars["New Hire"].get() is False)
+app.type_var.set("Safety Coaching")
+app._on_type_change()
+check("no other type gets a default tick",
+      not any(v.get() for v in app.detail_vars.values()))
+
+print("\nMouse wheel is bound per window, never application-wide (item 2)")
+# The bug: dialogs bound the wheel on the app-wide "all" tag, and the roster panel
+# answers <Leave> -- which fires on the way INTO a dialog -- with unbind_all.
+probe = eb.tk.Toplevel(app)
+probe.withdraw()
+app._wheel_scrolls(probe, eb.tk.Canvas(probe))
+check("the dialog's own window carries the binding", bool(probe.bind("<MouseWheel>")))
+app.unbind("<MouseWheel>")                  # exactly what the roster panel's <Leave> does
+check("a main-window <Leave> cannot unbind it", bool(probe.bind("<MouseWheel>")))
+check("nothing is bound on the app-wide tag", not app.bind_all("<MouseWheel>"))
+probe.destroy()
+# The docstring in _wheel_scrolls still NAMES bind_all, on purpose -- match the call.
+check("no widget binds the wheel app-wide any more",
+      '.bind_all("<MouseWheel>"' not in
+      open(eb.__file__, encoding="utf-8").read())
+
+print("\nA batch group is editable in place (item 3, 2026-09-10)")
+names = [p["name"] for p in eb._demo_people()][:2]
+app.checked = set(names)
+app.type_var.set("Safety Coaching")
+app._on_type_change()
+app.desc_text.delete("1.0", "end")
+app.desc_text.insert("1.0", "original text")
+app.loc_mode.set("per_employee")
+app._add_group()
+check("a two-person group went in", len(app.groups[-1]["rows"]) == 2)
+
+idx = len(app.groups) - 1
+app._edit_group(idx)
+ctx = app.edit_ctx
+ctx["win"].withdraw()
+ctx["description"].delete("1.0", "end")
+ctx["description"].insert("1.0", "edited text")
+ctx["coaching_type"].set("Health/Wellness Coaching")
+ctx["render_details"](set())                # what clicking that radio does
+ctx["keep"][names[1]].set(False)            # drop the second person
+groups_before = len(app.groups)
+ctx["save"]()
+g = app.groups[idx]
+check("the group stayed put in the batch", len(app.groups) == groups_before)
+check("every remaining row took the new text",
+      all(r["description"] == "edited text" for r in g["rows"]))
+check("unticking a name drops that row only",
+      [r["employee"] for r in g["rows"]] == [names[0]])
+check("the new coaching type reached the rows",
+      g["rows"][0]["coaching_type"] == "Health/Wellness Coaching")
+check("the batch label was rebuilt around it",
+      "Health/Wellness Coaching" in g["label"] and eb.SUGGEST_TYPE not in g["label"])
+check("a written description leaves nothing pending", g["pending"] is None)
+
+# Note only is what routes a group to `claude -p` at write time. Flipping it in an edit
+# has to move the group on and off that list, or a note ships as a description.
+app._edit_group(idx)
+ctx = app.edit_ctx
+ctx["win"].withdraw()
+ctx["note"].set(True)
+ctx["save"]()
+check("ticking Note only puts the group back on the pending list",
+      (app.groups[idx]["pending"] or {}).get("description") is True)
+app._edit_group(idx)
+ctx = app.edit_ctx
+ctx["win"].withdraw()
+ctx["note"].set(False)
+ctx["save"]()
+check("clearing it takes the group back off", app.groups[idx]["pending"] is None)
+
+
 app.destroy()
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: " + "; ".join(fails)))
 sys.exit(1 if fails else 0)
