@@ -79,6 +79,14 @@ PICK_ONE = "— pick one —"
 SUGGEST_TYPE = "— suggest it from my note —"
 BLANK = ""
 
+# Detail boxes that start TICKED when a coaching type is picked (Dane, 2026-09-10).
+# Relationship Development is a current employee nine times out of ten. This is a
+# default, not a guess: the box is on screen, ticked, in the block the form opens for
+# you, and a new hire is one click away. Nothing here reaches a record unseen.
+TYPE_DEFAULT_DETAILS = {
+    "Relationship Development Encounter": ("Current Employee",),
+}
+
 # Checked names get a filled box + a tinted row so the pick is obvious at a glance
 # across a 261-name list — the faint "X" prefix was too easy to lose track of.
 CHECK_ON = "☑"
@@ -842,6 +850,23 @@ class EncounterBuilder(tk.Tk):
             pass          # element already defined (another instance in this process)
 
     @staticmethod
+    def _wheel_scrolls(win, canvas):
+        """Mouse wheel anywhere in `win` scrolls `canvas`.
+
+        Bound on the TOPLEVEL, never with bind_all. Every widget carries its toplevel in
+        its bindtags, so one binding covers the cards, their labels and the search box —
+        and touches no other window.
+
+        bind_all was the bug (Dane, 2026-09-10: the Description library would not
+        scroll). It writes to the application-wide "all" tag, and the roster panel's
+        canvas answers <Leave> — which fires the moment the pointer crosses out of the
+        main window — with unbind_all("<MouseWheel>"). Opening a dialog therefore
+        deleted that dialog's own scrolling on the way in.
+        """
+        win.bind("<MouseWheel>",
+                 lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+    @staticmethod
     def _scrolled_list(parent, **kw):
         """The roster list: a read-only tk.Text + scrollbar that grows with its container.
 
@@ -1364,9 +1389,11 @@ class EncounterBuilder(tk.Tk):
         frame.bind("<Configure>",
                    lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(fwin, width=e.width))
-        canvas.bind("<Enter>", lambda e: canvas.bind_all(
+        # Scoped to this window (self), not the "all" tag: a dialog binds its own wheel
+        # on its own toplevel, and <Leave> here can no longer reach in and delete it.
+        canvas.bind("<Enter>", lambda e: self.bind(
             "<MouseWheel>", lambda ev: canvas.yview_scroll(int(-ev.delta / 120), "units")))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        canvas.bind("<Leave>", lambda e: self.unbind("<MouseWheel>"))
 
         row = 0
         # Date — calendar picker, never typed.
@@ -1654,8 +1681,9 @@ class EncounterBuilder(tk.Tk):
         # go 3-up to save vertical room now that coaching type is a tall radio block.
         longest = max((len(n) for n in options), default=0)
         cols = 2 if longest > 24 else 3
+        defaults = TYPE_DEFAULT_DETAILS.get(chosen, ())
         for i, name in enumerate(options):
-            var = tk.BooleanVar()
+            var = tk.BooleanVar(value=name in defaults)
             self.detail_vars[name] = var
             ttk.Checkbutton(self.details_frame, text=name, variable=var,
                             style="Radio10.TCheckbutton",
@@ -1720,10 +1748,7 @@ class EncounterBuilder(tk.Tk):
         inner.bind("<Configure>",
                    lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(cwin, width=e.width))
-        # Mouse wheel scrolls the list while the (modal) dialog is up; released on close.
-        canvas.bind_all("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
-        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        self._wheel_scrolls(win, canvas)
 
         def use(entry):
             # ONLY the description text reaches the record — never the label or note.
@@ -1739,6 +1764,13 @@ class EncounterBuilder(tk.Tk):
                     self.type_var.set(auto_ct)
                     self._on_type_change()      # rebuild the detail boxes for that type
             ticked = details_from_hint(entry["hint"], list(self.detail_vars))
+            if ticked:
+                # The entry names the boxes it expects, so it OVERRIDES the type's
+                # default tick — a New Hire check-in must not come out of the library
+                # with "Current Employee" still ticked beside it.
+                for name in TYPE_DEFAULT_DETAILS.get(self.type_var.get(), ()):
+                    if name not in ticked and name in self.detail_vars:
+                        self.detail_vars[name].set(False)
             for name in ticked:
                 self.detail_vars[name].set(True)
             # The library just set the type and ticked boxes on Dane's behalf. Fold the
@@ -2533,9 +2565,7 @@ class EncounterBuilder(tk.Tk):
         self.review_inner.bind(
             "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(cwin, width=e.width))
-        canvas.bind_all("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
-        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        self._wheel_scrolls(win, canvas)
 
         bar = ttk.Frame(win, padding=(12, 8))
         bar.grid(row=2, column=0, columnspan=2, sticky="ew")
@@ -2570,6 +2600,11 @@ class EncounterBuilder(tk.Tk):
             ttk.Button(head, text="Delete", width=8,
                        command=lambda idx=i: self._confirm_delete(idx)).grid(
                 row=0, column=1, sticky="e")
+            # Item 3 (Dane, 2026-09-10): one wrong field used to mean deleting the
+            # group and rebuilding it from the roster.
+            ttk.Button(head, text="Edit", width=8,
+                       command=lambda idx=i: self._edit_group(idx)).grid(
+                row=1, column=1, sticky="ne", pady=(4, 0))
 
             meta = (f"{s['date']}  ·  {s['encounter_type']}  ·  {s['prompted']}"
                     f"  ·  Dept: {s['where']}  ·  Shift: {s['shift']}"
@@ -2614,6 +2649,262 @@ class EncounterBuilder(tk.Tk):
                 f"The other groups stay as they are.",
                 parent=self.review_win):
             self._delete_group(index)
+
+    @staticmethod
+    def _group_label(rows, coaching_type, details, raw_date, where):
+        """One group's line in the batch, in the shape _add_group / _add_single write
+        it — _resolve_pending rewrites SUGGEST_TYPE inside this string."""
+        bit = "  ·  " + details if details else ""
+        if len(rows) == 1:
+            return (f"  1 person  ·  {coaching_type}{bit}"
+                    f"  ·  {raw_date or 'today'}  ·  {rows[0]['employee']}")
+        return (f"{len(rows):>3} people  ·  {coaching_type}{bit}"
+                f"  ·  {raw_date or 'today'}  ·  {where}")
+
+    def _edit_group(self, index):
+        """Open one group of the batch and change what it holds — in place.
+
+        Everything the group carries is editable here except who else could be in it:
+        names can be dropped, not added, because adding one is a roster search and the
+        roster lives on the build tab.
+
+        The rows are edited in place, so the group keeps its position in the batch and
+        the CSV keeps its order. Nothing moves until Save; Cancel leaves the batch
+        exactly as it was.
+        """
+        if not (0 <= index < len(self.groups)):
+            return
+        group = self.groups[index]
+        rows = group["rows"]
+        r0 = rows[0]
+        spec = group.get("pending") or {}
+        # Department/division/shift are per-person in the mode that reads them off each
+        # roster row. Offer them only where the group already shares one set — writing a
+        # single department across a spread-out group would silently relocate people.
+        uniform = len({(r["department"], r["division"], r["shift"]) for r in rows}) == 1
+
+        win = tk.Toplevel(self)
+        win.title("Edit encounter")
+        # Sized off the real screen, never off a literal.
+        win.geometry(f"720x{min(660, max(420, self.winfo_screenheight() - 140))}")
+        win.configure(bg=UI_BG)
+        win.transient(getattr(self, "review_win", None) or self)
+        win.grid_rowconfigure(0, weight=1)
+        win.grid_columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(win, highlightthickness=0, bg=UI_BG)
+        canvas.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=(10, 0))
+        vsb = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        vsb.grid(row=0, column=1, sticky="ns", pady=(10, 0))
+        canvas.configure(yscrollcommand=vsb.set)
+        body = ttk.Frame(canvas, padding=(4, 4))
+        bwin = canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(bwin, width=e.width))
+        self._wheel_scrolls(win, canvas)
+        body.grid_columnconfigure(1, weight=1)
+
+        row = 0
+        ttk.Label(body, text=f"{len(rows)} encounter(s) in this group",
+                  font=("Segoe UI", 12, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        row += 1
+        ttk.Label(body, text="Date").grid(row=row, column=0, sticky="w", pady=3)
+        date_var = tk.StringVar(value=r0["date"])
+        datef = ttk.Frame(body)
+        datef.grid(row=row, column=1, sticky="w")
+        de = ttk.Entry(datef, textvariable=date_var, width=12, state="readonly")
+        de.pack(side="left")
+        de.bind("<Button-1>", lambda e: self._open_calendar(date_var))
+        ttk.Button(datef, text="📅  Pick date",
+                   command=lambda: self._open_calendar(date_var)).pack(
+            side="left", padx=(6, 0))
+
+        def combo(label, value, values):
+            nonlocal row
+            row += 1
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            var = tk.StringVar(value=value)
+            # readonly, not normal: a free-typed value the EMR has never heard of is no
+            # more expressible here than it is on the build tab.
+            ttk.Combobox(body, textvariable=var, values=values, state="readonly",
+                         width=40).grid(row=row, column=1, sticky="w")
+            return var
+
+        etype_var = combo("Encounter type", r0["encounter_type"], ace.ENCOUNTER_TYPES)
+        cat_var = combo("Category", r0["category"],
+                        [BLANK] + ace.FIELD_OPTIONS.get("Category", []))
+        prompted_var = combo("Prompted by", r0["what_prompted"],
+                             ace.WHAT_PROMPTED_OPTIONS)
+        if uniform:
+            dept_var = combo("Department", r0["department"],
+                             [BLANK] + ace.FIELD_OPTIONS.get("Department", []))
+            div_var = combo("Division", r0["division"],
+                            [BLANK] + ace.FIELD_OPTIONS.get("Division", []))
+            shift_var = combo("Shift", r0["shift"],
+                              [BLANK] + ace.FIELD_OPTIONS.get("Shift", []))
+        else:
+            dept_var = div_var = shift_var = None
+            row += 1
+            ttk.Label(body, text="Department, division and shift come from each "
+                                 "person's roster record and are left alone.",
+                      foreground=UI_MUTED, wraplength=520).grid(
+                row=row, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        row += 1
+        ttk.Separator(body, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6)
+        row += 1
+        ttk.Label(body, text="Coaching type", font=("Segoe UI", 11, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+        ctype_var = tk.StringVar(value=r0["coaching_type"])
+        ctype_frame = ttk.Frame(body)
+        ctype_frame.grid(row=row, column=0, columnspan=2, sticky="w")
+
+        row += 1
+        ttk.Label(body, text="Details", font=("Segoe UI", 11, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        row += 1
+        dframe = ttk.Frame(body)
+        dframe.grid(row=row, column=0, columnspan=2, sticky="w")
+        dvars = {}
+
+        def render_details(preset):
+            """Rebuild the boxes for the chosen type, ticking `preset`.
+
+            Same source as the build tab — ace.CHECKBOX_UUID_MAP — so the boxes on
+            screen are the EMR's own and an invalid combination is not expressible.
+            """
+            for child in dframe.winfo_children():
+                child.destroy()
+            dvars.clear()
+            options = sorted(ace.CHECKBOX_UUID_MAP.get(ctype_var.get(), {}))
+            if not options:
+                ttk.Label(dframe,
+                          text=("(no boxes until the type is known — you tick them "
+                                "in the EMR)" if ctype_var.get() == SUGGEST_TYPE
+                                else "(this type has no details)"),
+                          foreground=UI_MUTED).grid(row=0, column=0, sticky="w")
+                return
+            cols = 2 if max(len(n) for n in options) > 24 else 3
+            for i, name in enumerate(options):
+                var = tk.BooleanVar(value=name in preset)
+                dvars[name] = var
+                ttk.Checkbutton(dframe, text=name, variable=var,
+                                style="Radio10.TCheckbutton").grid(
+                    row=i // cols, column=i % cols, sticky="w", padx=(0, 12))
+
+        def on_type():
+            # A type switch brings that type's own boxes, default tick included — the
+            # same thing picking it on the build tab does.
+            render_details(set(TYPE_DEFAULT_DETAILS.get(ctype_var.get(), ())))
+
+        self._radios(ctype_frame, ctype_var, COACHING_TYPES + [SUGGEST_TYPE],
+                     columns=2, command=on_type, font="small").grid(
+            row=0, column=0, sticky="w")
+        render_details({d.strip() for d in (r0["details"] or "").split(";") if d.strip()})
+
+        row += 1
+        head = ttk.Frame(body)
+        head.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(head, text="Description",
+                  font=("Segoe UI", 11, "bold")).pack(side="left")
+        note_var = tk.BooleanVar(value=bool(spec.get("description")))
+        ttk.Checkbutton(head, text="Note only — Claude writes it", variable=note_var,
+                        style="Radio10.TCheckbutton").pack(side="right")
+        row += 1
+        desc = tk.Text(body, height=6, wrap="word", font=("Segoe UI", 11), bg=UI_CARD,
+                       fg=UI_TEXT, borderwidth=1, relief="solid", highlightthickness=1,
+                       highlightbackground=UI_BORDER, padx=6, pady=6)
+        desc.grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
+        desc.insert("1.0", r0["description"])
+
+        row += 1
+        ttk.Label(body, text="Who", font=("Segoe UI", 11, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        row += 1
+        ttk.Label(body, text="Untick to drop someone from this group. Adding a name is "
+                             "a roster search, so that stays on the build tab.",
+                  foreground=UI_MUTED, wraplength=640).grid(
+            row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+        whof = ttk.Frame(body)
+        whof.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        keep_vars = {}
+        for i, r in enumerate(rows):
+            var = tk.BooleanVar(value=True)
+            keep_vars[r["employee"]] = var
+            ttk.Checkbutton(whof, text=r["employee"], variable=var,
+                            style="Radio10.TCheckbutton").grid(
+                row=i // 2, column=i % 2, sticky="w", padx=(0, 16))
+
+        def save():
+            ctype = ctype_var.get()
+            if ctype == PICK_ONE:
+                messagebox.showwarning("Coaching type", "Pick a coaching type.",
+                                       parent=win)
+                return
+            raw_date = date_var.get().strip()
+            if raw_date:
+                try:
+                    datetime.strptime(raw_date, "%m/%d/%Y")
+                except ValueError:
+                    messagebox.showwarning("Date", f"'{raw_date}' isn't MM/DD/YYYY.",
+                                           parent=win)
+                    return
+            description = desc.get("1.0", "end-1c").strip()
+            if not description:
+                messagebox.showwarning(
+                    "Description",
+                    "Say what the note is about first — a topic is enough."
+                    if note_var.get() else "Write a description first.", parent=win)
+                return
+            keep = [r for r in rows if keep_vars[r["employee"]].get()]
+            if not keep:
+                messagebox.showwarning(
+                    "Nobody left",
+                    "Keep at least one person, or close this and use Delete to remove "
+                    "the whole group.", parent=win)
+                return
+            details = "; ".join(sorted(n for n, v in dvars.items() if v.get()))
+            for r in keep:
+                r["date"] = raw_date
+                r["encounter_type"] = etype_var.get()
+                r["category"] = cat_var.get()
+                r["what_prompted"] = prompted_var.get()
+                r["coaching_type"] = ctype
+                r["details"] = details
+                r["description"] = description
+                if uniform:
+                    r["department"] = dept_var.get()
+                    r["division"] = div_var.get()
+                    r["shift"] = shift_var.get()
+            group["rows"] = keep
+            group["pending"] = self._pending_for(description, note_var.get(), ctype)
+            depts = {r["department"] or "—" for r in keep}
+            group["label"] = self._group_label(
+                keep, ctype, details, raw_date,
+                next(iter(depts)) if len(depts) == 1 else "per employee")
+            self._update_batch()
+            win.destroy()
+
+        bar = ttk.Frame(win, padding=(12, 10))
+        bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        ttk.Button(bar, text="Save changes", style="Accent.TButton",
+                   command=save).pack(side="right")
+        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side="right", padx=6)
+        # Handles onto the open dialog. It is built out of closures, and its save path
+        # -- rows edited in place, names dropped, pending recomputed -- is the part
+        # worth a regression test. See test_builder_ui.py.
+        self.edit_ctx = {"win": win, "date": date_var, "etype": etype_var,
+                         "category": cat_var, "prompted": prompted_var,
+                         "coaching_type": ctype_var, "details": dvars,
+                         "note": note_var, "description": desc, "keep": keep_vars,
+                         "render_details": render_details, "save": save}
+        win.grab_set()
 
     # ── notes → descriptions ──────────────────
     #
@@ -2676,8 +2967,17 @@ class EncounterBuilder(tk.Tk):
         built from ace.CSV_COLUMNS — so an extra key on a row would either raise or
         invent a column the EMR has never heard of. This dies with the batch.
         """
-        needs_desc = bool(self.note_var.get())
-        needs_type = self.type_var.get() == SUGGEST_TYPE
+        return self._pending_for(description, self.note_var.get(), self.type_var.get())
+
+    @staticmethod
+    def _pending_for(description, note_only, coaching_type):
+        """Same spec, built from explicit values — what the edit dialog rebuilds with.
+
+        Ticking or clearing "Note only" in an edit has to move the group on and off the
+        pending list, or a note would reach encounters.csv as a description.
+        """
+        needs_desc = bool(note_only)
+        needs_type = coaching_type == SUGGEST_TYPE
         if not (needs_desc or needs_type):
             return None
         return {"note": description, "description": needs_desc,
