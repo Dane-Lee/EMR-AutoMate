@@ -67,6 +67,9 @@ ROSTER_XLSX = os.path.join(_HERE, "roster.xlsx")
 OUT_CSV = os.path.join(_HERE, "encounters.csv")
 BAK_CSV = os.path.join(_HERE, "encounters.bak.csv")
 LIBRARY_XLSX = os.path.join(_HERE, "EMR Easy Enter Worksheets.xlsx")
+LIBRARY_ADDITIONS_JSON = os.path.join(_HERE, "library_additions.json")
+# A batch dictated in chat: text and classification, no names, no location.
+DICTATED_JSON = os.path.join(_HERE, "dictated_batch.json")
 PREFS_JSON = os.path.join(_HERE, "builder_prefs.json")
 
 # No default. An unset coaching type blocks the group — see the module docstring.
@@ -392,12 +395,12 @@ def load_library(path=None):
     """
     path = path or LIBRARY_XLSX
     if not os.path.exists(path):
-        return []
+        return load_additions()
     try:
         from openpyxl import load_workbook
         wb = load_workbook(path, data_only=True, read_only=True)
     except Exception:
-        return []
+        return load_additions()
 
     entries = []
     for tab in wb.sheetnames:
@@ -439,7 +442,102 @@ def load_library(path=None):
                         entry["hint"] = hint
                 open_entries = []
     wb.close()
-    return entries
+    # Everything written since the workbook was last updated, under its own tab.
+    return entries + load_additions()
+
+
+def load_additions(path=None):
+    """[{tab, label, hint, text, added, from}] — descriptions written since the workbook
+    was last updated, loaded alongside it (Dane, 2026-09-16).
+
+    WHY NOT JUST WRITE INTO THE WORKBOOK. `EMR Easy Enter Worksheets.xlsx` is Dane's own
+    file and it is open in Excel half the time, so a script that appends to it fails on a
+    file lock exactly when he is using it. It also has no schema — each tab arranges
+    label / description / "Choose …" hint its own way, and getting that wrong is the
+    join that put three fields into 77 records. This file is the second source instead:
+    the builder merges it into the library at load, so a description written in chat is
+    in the Library dialog under its own tab the next time the builder opens, and the
+    workbook stays his to update when he feels like it.
+
+    A malformed file never stops the builder opening. The batch matters more than the
+    library, and a description that fails to load is a description he types himself.
+    """
+    path = path or LIBRARY_ADDITIONS_JSON
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception as exc:
+        print(f"  library_additions.json couldn't be read, ignoring it: {exc}")
+        return []
+    if not isinstance(raw, list):
+        return []
+
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        tab = str(item.get("tab", "") or "").strip()
+        text = str(item.get("text", "") or "").strip()
+        if not tab or not text:
+            continue            # no home or no words: not an entry
+        out.append({
+            "tab": tab,
+            "label": str(item.get("label", "") or "").strip() or tab,
+            # `hint` drives details_from_hint, which ticks detail boxes off the quoted
+            # names in it. Nothing else belongs in this field — provenance goes in
+            # `from`, where it can't tick anything.
+            "hint": str(item.get("hint", "") or "").strip(),
+            "text": text,
+            "added": str(item.get("added", "") or "").strip() or "added",
+            "from": str(item.get("from", "") or "").strip(),
+        })
+    return out
+
+
+def append_library_addition(entry, path=None):
+    """File one description in library_additions.json. True if written, False if it was
+    already there.
+
+    The same text twice is not an addition. A library that grows three versions of one
+    description is what the use-it / adapt-it / write-it order exists to prevent, so an
+    exact repeat is skipped. An ADAPTED entry carries `from`, naming the entry it came
+    out of, so the pair can be reconciled at merge time instead of looking like two
+    unrelated descriptions that happen to rhyme.
+    """
+    path = path or LIBRARY_ADDITIONS_JSON
+    tab = str(entry.get("tab", "") or "").strip()
+    text = str(entry.get("text", "") or "").strip()
+    if not tab or not text:
+        raise ValueError("a library addition needs both a tab and its text")
+
+    existing = []
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                existing = json.load(fh)
+            if not isinstance(existing, list):
+                existing = []
+        except Exception:
+            # Unreadable: treated as empty on load, so treat it as empty here too rather
+            # than appending onto something that will never be read back.
+            existing = []
+    if any(isinstance(e, dict) and str(e.get("text", "") or "").strip() == text
+           for e in existing):
+        return False
+
+    row = {"tab": tab, "label": str(entry.get("label", "") or "").strip() or tab,
+           "text": text}
+    if entry.get("hint"):
+        row["hint"] = str(entry["hint"]).strip()
+    if entry.get("from"):
+        row["from"] = str(entry["from"]).strip()
+    row["added"] = str(entry.get("added") or date.today().strftime("%Y-%m-%d"))
+    existing.append(row)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(existing, fh, indent=2, ensure_ascii=False)
+    return True
 
 
 # Coaching-type words that say nothing about WHICH library tab to show — every type
@@ -554,6 +652,213 @@ def save_specialist(name, path=None):
     data = _read_prefs(path)
     data["specialist"] = str(name or "").strip()
     _write_prefs(data, path)
+
+
+def load_dictated_batch(path=None):
+    """(rows, problems) from dictated_batch.json — a batch dictated in chat, no names.
+
+    Dane dictates a day's encounters to Claude (`.claude/commands/dictate.md`); what comes
+    back is the text and the classification, never a name and never a location. This reads
+    that file so the builder can hand him each row and ask who it was about.
+
+    NOTHING HERE IS TRUSTED THE WAY THE ROSTER IS. The file is written by a model, so
+    every controlled value is checked against the EMR's own lists before it can reach a
+    row, and anything that fails is REFUSED, not corrected:
+
+      * a coaching type that isn't in COACHING_TYPE_UUIDS drops the row
+      * a detail box that isn't one of that type's real options is dropped from the row
+        and reported, because a box Dane didn't mean is a controlled value in a record
+      * an empty description drops the row
+
+    Refs survive exactly as written. The ref is the only link between this text and the
+    person it belongs to, and that mapping lives on Dane's side of the boundary.
+    """
+    path = path or DICTATED_JSON
+    if not os.path.exists(path):
+        return [], []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception as exc:
+        return [], [("file", f"couldn't be read: {exc}")]
+
+    if isinstance(raw, dict):
+        raw_rows = raw.get("rows")
+    elif isinstance(raw, list):
+        raw_rows = raw
+    else:
+        raw_rows = None
+    if not isinstance(raw_rows, list):
+        return [], [("file", "no rows in it")]
+
+    rows, problems = [], []
+    for i, item in enumerate(raw_rows, start=1):
+        if not isinstance(item, dict):
+            problems.append((str(i), "not an encounter"))
+            continue
+        ref = str(item.get("ref", "") or i)
+        ctype = str(item.get("coaching_type", "") or "").strip()
+        description = str(item.get("description", "") or "").strip()
+
+        if not description:
+            problems.append((ref, "no description"))
+            continue
+        if ctype not in ace.COACHING_TYPE_UUIDS:
+            problems.append((ref, f"'{ctype}' is not an EMR coaching type"
+                                  if ctype else "no coaching type"))
+            continue
+
+        valid = ace.CHECKBOX_UUID_MAP.get(ctype, {})
+        wanted = item.get("details") or []
+        if isinstance(wanted, str):
+            wanted = [d.strip() for d in wanted.split(";")]
+        keep, dropped = [], []
+        for name in wanted:
+            name = str(name).strip()
+            if not name:
+                continue
+            match = next((v for v in valid if v.lower() == name.lower()), None)
+            (keep if match else dropped).append(match or name)
+
+        group_size = item.get("group_size") or 1
+        try:
+            group_size = max(1, int(group_size))
+        except (TypeError, ValueError):
+            group_size = 1
+
+        rows.append({"ref": ref, "coaching_type": ctype, "details": keep,
+                     "dropped": dropped, "description": description,
+                     "library": str(item.get("library", "") or "").strip(),
+                     "group_size": group_size})
+    return rows, problems
+
+
+CODE_MAP_DIR = os.path.join(_HERE, "Encounter Work")
+_CODE_MAP_SHEETS = ("code map", "codes", "cheat sheet", "cheatsheet", "key")
+
+
+def load_code_map(path=None):
+    """Dane's ref -> employee-name cheat sheet. Returns (mapping, problem).
+
+    He tracks a week of encounters under codes of his own (`A2`, `B10`) so the workbook
+    he hands over carries no names, and keeps the code -> person map separately. This
+    reads that map so the builder can attach the right person to each dictated ref
+    instead of asking him forty times.
+
+    THIS IS THE RE-IDENTIFICATION KEY AND IT NEVER LEAVES THE PROCESS. It is read here,
+    joined to the roster here, and used to fill a row here. It is not printed (every
+    caller runs names through `ph()`), it is not written to any file the builder emits,
+    and it is never part of what `_resolve_pending` hands to `claude -p` — that call
+    still crosses with a note, a head count and a coaching type, and nothing else. It
+    lives under `Encounter Work/`, which is gitignored as a directory.
+
+    Format, deliberately forgiving because Dane builds it by hand: a `.csv` or `.xlsx`
+    with two columns, code then name. A header row is detected and skipped. In a
+    workbook, the first sheet named one of `_CODE_MAP_SHEETS` wins; otherwise the first
+    sheet with two populated columns is used.
+
+    A code appearing twice with different names is a CONFLICT and drops that code
+    entirely rather than picking one — the wrong person on a medical record is the worst
+    outcome this tool can produce, and a silent tiebreak is how you get there.
+    """
+    import csv
+    import glob as _glob
+
+    if path is None:
+        cands = []
+        for pat in ("code_map.csv", "code_map.xlsx", "code map.csv", "code map.xlsx",
+                    "cheat_sheet.csv", "cheat_sheet.xlsx"):
+            cands += _glob.glob(os.path.join(CODE_MAP_DIR, pat))
+        if not cands:
+            return {}, ("No cheat sheet found. Put a two-column file (code, name) at "
+                        f"{os.path.join(CODE_MAP_DIR, 'code_map.csv')} — "
+                        "or code_map.xlsx — and the builder will name refs for you.")
+        path = sorted(cands, key=os.path.getmtime, reverse=True)[0]
+
+    pairs = []
+    try:
+        if path.lower().endswith(".csv"):
+            with open(path, newline="", encoding="utf-8-sig") as fh:
+                pairs = [row[:2] for row in csv.reader(fh) if len(row) >= 2]
+        else:
+            import openpyxl
+            wb = openpyxl.load_workbook(path, data_only=True)
+            ws = next((wb[t] for t in wb.sheetnames
+                       if t.strip().lower() in _CODE_MAP_SHEETS), None)
+            if ws is None:
+                ws = next((s for s in wb.worksheets if s.max_column >= 2), wb.worksheets[0])
+            pairs = [[r[0], r[1]] for r in ws.iter_rows(values_only=True)
+                     if r and len(r) >= 2]
+    except Exception as exc:
+        return {}, f"Could not read {os.path.basename(path)}: {exc}"
+
+    mapping, conflicts = {}, set()
+    for raw_code, raw_name in pairs:
+        code = str(raw_code or "").strip()
+        name = str(raw_name or "").strip()
+        if not code or not name:
+            continue
+        if code.lower() in ("code", "ref", "#") or name.lower() in ("name", "employee"):
+            continue                                   # header row
+        if code in mapping and mapping[code] != name:
+            conflicts.add(code)
+        mapping[code] = name
+    for code in conflicts:
+        mapping.pop(code, None)
+
+    problem = ""
+    if conflicts:
+        problem = (f"{len(conflicts)} code(s) appear twice with different names and were "
+                   f"left out: {', '.join(sorted(conflicts))}. Fix the cheat sheet.")
+    if not mapping and not problem:
+        problem = f"{os.path.basename(path)} has no usable code/name pairs in it."
+    return mapping, problem
+
+
+def resolve_refs(refs, code_map, people):
+    """ref -> roster display name, for refs the cheat sheet names unambiguously.
+
+    Returns (resolved, unresolved) where `unresolved` is [(ref, why)] — every ref that
+    does NOT come back in `resolved` must still be picked by hand. Three ways to miss,
+    and all three fall back rather than guess:
+
+      * the code is not in the cheat sheet,
+      * the name it gives matches nobody on the roster,
+      * it matches more than one person — `find_matches` returns every hit precisely so
+        the caller can refuse, and refusing is what this does.
+    """
+    import name_match
+
+    candidates = [p["name"] for p in people]
+    resolved, unresolved = {}, []
+    for ref in refs:
+        name = code_map.get(str(ref).strip())
+        if not name:
+            unresolved.append((ref, "not in the cheat sheet"))
+            continue
+        hits, _how = name_match.find_matches(name, candidates)
+        if len(hits) == 1:
+            resolved[ref] = candidates[hits[0]]
+        elif not hits:
+            unresolved.append((ref, "cheat-sheet name is not on the roster"))
+        else:
+            unresolved.append((ref, f"matches {len(hits)} roster people — ambiguous"))
+    return resolved, unresolved
+
+
+def archive_dictated_batch(path=None):
+    """Rename the file once its rows are in the batch, so the same encounters can't be
+    imported twice. Renamed, never deleted — the same choice tracker_import makes."""
+    path = path or DICTATED_JSON
+    if not os.path.exists(path):
+        return None
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = path.replace(".json", f".{stamp}.json")
+    try:
+        os.replace(path, dest)
+        return dest
+    except OSError:
+        return None
 
 
 # ─────────────────────────────────────────────
@@ -1703,6 +2008,7 @@ class EncounterBuilder(tk.Tk):
         by category, filterable. The old one-line-per-description list truncated every
         entry so you had to click each just to read it; this shows them."""
         WRAP = 940     # text wrap width inside a card (dialog is a fixed 1040 wide)
+        DOT = "·"
         win = tk.Toplevel(self)
         win.title("Standard descriptions")
         win.geometry("1040x680")
@@ -1810,7 +2116,9 @@ class EncounterBuilder(tk.Tk):
                 head.columnconfigure(0, weight=1)
                 tk.Label(head, text=e["label"] or e["tab"], bg=UI_CARD, fg=UI_TEXT,
                          font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-                tk.Label(head, text=e["tab"], bg=UI_ACCENT_SOFT, fg=UI_ACCENT_TEXT,
+                chip = e["tab"] + (f"  {DOT}  added " + e["added"]
+                                   if e.get("added") else "")
+                tk.Label(head, text=chip, bg=UI_ACCENT_SOFT, fg=UI_ACCENT_TEXT,
                          font=("Segoe UI", 9), padx=8, pady=2).grid(
                     row=0, column=1, sticky="e", padx=8)
                 ttk.Button(head, text="Use", width=7, style="Accent.TButton",
@@ -1830,8 +2138,10 @@ class EncounterBuilder(tk.Tk):
 
         bar = ttk.Frame(win, padding=(12, 10))
         bar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        added = sum(1 for e in self.library if e.get("added"))
         ttk.Label(bar, text=f"{len(self.library)} standard descriptions · "
-                            f"only the text you pick reaches the record",
+                            + (f"{added} added since the workbook · " if added else "")
+                            + "only the text you pick reaches the record",
                   foreground=UI_MUTED).pack(side="left")
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         render()
@@ -1867,12 +2177,23 @@ class EncounterBuilder(tk.Tk):
         self.add_btn.pack(side="left")
         ttk.Button(actions, text="📥 From Tracker Lite",
                    command=self._import_tracker).pack(side="left", padx=6)
+        self.dictated_btn = ttk.Button(actions, text="From dictation",
+                                       command=self._import_dictated)
+        self.dictated_btn.pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Review batch…",
                    command=self._review_batch).pack(side="left", padx=6)
         ttk.Button(actions, text="Undo last group",
                    command=self._undo_group).pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Write & enter batch", style="Accent.TButton",
                    command=self._write_csv).pack(side="left")
+        self._refresh_dictated_btn()
+
+    def _refresh_dictated_btn(self):
+        """Carry the waiting count on the button itself, so a batch dictated this morning
+        isn't something he has to remember to go looking for."""
+        rows, problems = load_dictated_batch()
+        self.dictated_btn.config(
+            text=f"From dictation ({len(rows)})" if rows else "From dictation")
 
     def _import_tracker(self):
         """Pull floor captures from EMR Tracker Lite into the batch.
@@ -1978,12 +2299,161 @@ class EncounterBuilder(tk.Tk):
                       f"   [Tracker Lite]"),
         })
 
-    def _attach_names_to_capture(self, cap, ti):
+    def _add_dictated_row(self, row, ref):
+        """Add one dictated encounter as its own group of one.
+
+        The ref rides in the label, because that is the number Dane's own list is keyed
+        by — it is how he checks, in Review, that row 3's text landed on row 3's person.
+        """
+        self.groups.append({
+            "rows": [row],
+            "label": (f"  1 person  ·  {row['coaching_type']}"
+                      f"{'  ·  ' + row['details'] if row['details'] else ''}"
+                      f"  ·  {row['date'] or 'today'}  ·  {row['employee']}"
+                      f"   [dictated #{ref}]"),
+        })
+
+    def _dictated_row(self, name, drow):
+        """One dictated encounter, for one person.
+
+        Department, division and shift come off that person's ROSTER row. The dictation
+        never carried a location and never will — that is half of what keeps it on the
+        safe side of the PHI boundary. Encounter type, category, prompted-by and the date
+        come from the form, so whatever is set on screen applies to the whole import.
+        """
+        person = self.by_name[name]
+        return {
+            "employee": name,
+            "date": self.date_var.get().strip(),
+            "encounter_type": self.etype_var.get(),
+            "department": person["dept"],
+            "division": person["div"],
+            "category": self.cat_var.get(),
+            "shift": person["shift"],
+            "coaching_type": drow["coaching_type"],
+            "details": "; ".join(drow["details"]),
+            "description": drow["description"],
+            "what_prompted": self.prompted_var.get(),
+        }
+
+    def _import_dictated(self):
+        """Pull a batch dictated in chat into the builder, one name at a time.
+
+        Each dictated row becomes its own group of one — the same shape "Add & Next"
+        makes — so it shows in Review, can be edited or deleted on its own, and is
+        finished here before anything is written. A dictated row never bypasses the
+        builder, and nothing in the file can reach a record without Dane putting a name
+        on it first.
+        """
+        rows, problems = load_dictated_batch()
+        if not rows and not problems:
+            messagebox.showinfo(
+                "Nothing dictated",
+                "No dictated_batch.json to import.\n\n"
+                "Dictate a batch in Claude Code with /dictate; it writes the file here:\n"
+                f"  {DICTATED_JSON}")
+            return
+
+        # The cheat sheet, if he keeps one. Every ref it names unambiguously skips the
+        # by-hand pick; everything else still gets walked. The mapping goes no further
+        # than this method, and no name from it is ever printed or written to a file.
+        code_map, _map_problem = load_code_map()
+        resolved, unresolved = {}, [(r["ref"], "no cheat sheet") for r in rows]
+        if code_map:
+            resolved, unresolved = resolve_refs([r["ref"] for r in rows],
+                                                code_map, self.people)
+
+        detail = []
+        if rows:
+            total = sum(r["group_size"] for r in rows)
+            if resolved:
+                detail.append(f"{len(rows)} dictated encounter(s). The cheat sheet names "
+                              f"{len(resolved)} of them; I'll add those straight to the "
+                              f"batch and walk you through the other "
+                              f"{len(rows) - len(resolved)}.")
+            else:
+                detail.append(f"{len(rows)} dictated encounter(s) — {total} row(s) once "
+                              f"named. I'll walk you through them one at a time.")
+        if code_map and unresolved:
+            detail.append(f"\n{len(unresolved)} ref(s) the cheat sheet could not settle "
+                          f"— you'll pick these by hand:")
+            for ref, why in unresolved[:8]:
+                detail.append(f"   • #{ref} — {why}")
+            if len(unresolved) > 8:
+                detail.append(f"   … and {len(unresolved) - 8} more")
+        dropped = [(r["ref"], r["dropped"]) for r in rows if r["dropped"]]
+        if dropped:
+            detail.append("\nDetail boxes left OFF because they aren't options for that "
+                          "coaching type:")
+            for ref, names in dropped[:8]:
+                detail.append(f"   • #{ref} — {', '.join(names)}")
+        if problems:
+            detail.append(f"\n{len(problems)} could NOT be used and will be left out:")
+            for ref, why in problems[:8]:
+                detail.append(f"   • #{ref} — {why}")
+            if len(problems) > 8:
+                detail.append(f"   … and {len(problems) - 8} more")
+        if not rows:
+            messagebox.showwarning("Nothing usable", "\n".join(detail))
+            return
+        detail.append("\nDepartment, division and shift come from the roster.")
+        detail.append(f"Date, encounter type and category come from the form "
+                      f"({self.date_var.get() or 'today'} · {self.etype_var.get()}).")
+        detail.append("Continue?")
+        if not messagebox.askyesno("Import a dictated batch", "\n".join(detail)):
+            return
+
+        added_total = 0
+        for drow in rows:
+            cap = {"group_size": drow["group_size"],
+                   "date": self.date_var.get(),
+                   "coaching_type": drow["coaching_type"],
+                   "shift": "",
+                   "details": "; ".join(drow["details"]),
+                   "description": drow["description"],
+                   "needs": [],
+                   "ref": drow["ref"]}
+
+            def make_rows(picks, drow=drow):
+                new = [self._dictated_row(n, drow) for n in picks]
+                for r in new:
+                    self._add_dictated_row(r, drow["ref"])
+                return len(new)
+
+            picked = resolved.get(drow["ref"])
+            if picked:
+                added = make_rows([picked])
+            else:
+                added = self._attach_names_to_capture(cap, make_rows=make_rows)
+            if added is None:            # Dane stopped the walk
+                break
+            added_total += added
+
+        self._update_batch()
+        # Archive only when something was attached, so a cancelled walk leaves the file
+        # where it is and can be picked up again.
+        archived = archive_dictated_batch() if added_total else None
+        self._refresh_dictated_btn()
+        messagebox.showinfo(
+            "Imported",
+            f"{added_total} encounter(s) added to the batch.\n\n"
+            + (f"The dictated file was renamed to\n{os.path.basename(archived)}\n"
+               f"so the same encounters can't be imported twice."
+               if archived else
+               "The dictated file was left in place."))
+
+    def _attach_names_to_capture(self, cap, ti=None, make_rows=None):
         """Ask who a nameless capture was about. Returns rows added, or None if cancelled.
 
         The roster list is pre-filtered to the shift the capture was made on, because
         that is the one thing the phone CAN say without naming anybody, and it cuts 261
-        names down to the ~100 who were actually there.
+        names down to the ~100 who were actually there. A dictated row carries no shift
+        at all, so it gets the whole roster and the search box.
+
+        Two callers, one screen: Tracker Lite passes `ti` and the rows are built by the
+        importer; a dictated batch passes `make_rows(picks)` and builds its own. Adding a
+        second nameless source was never a reason to grow a second way of asking who
+        someone was.
         """
         win = tk.Toplevel(self)
         win.title("Who was this encounter with?")
@@ -1992,7 +2462,8 @@ class EncounterBuilder(tk.Tk):
         win.grab_set()
 
         want = cap["group_size"]
-        head = (f"{cap['date']}   ·   {cap['coaching_type'] or 'no coaching type'}"
+        head = ((f"#{cap['ref']}   ·   " if cap.get("ref") else "")
+                + f"{cap['date']}   ·   {cap['coaching_type'] or 'no coaching type'}"
                 + (f"   ·   {cap['shift']} shift" if cap["shift"] else ""))
         tk.Label(win, text=head, bg=UI_BG, fg=UI_TEXT,
                  font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14, pady=(12, 2))
@@ -2068,12 +2539,16 @@ class EncounterBuilder(tk.Tk):
                     + f", but you picked {len(picks)}.\n\nUse {len(picks)}?",
                     parent=win):
                 return
-            pairs, unmatched = ti.resolve_pending(cap, picks, self.people)
-            new_rows = ti.to_builder_rows(
-                pairs, encounter_type=self.etype_var.get(), category=self.cat_var.get())
-            for r in new_rows:
-                self._add_tracker_row(r)
-            result["added"] = len(new_rows)
+            if make_rows is not None:
+                result["added"] = make_rows(picks)
+            else:
+                pairs, unmatched = ti.resolve_pending(cap, picks, self.people)
+                new_rows = ti.to_builder_rows(
+                    pairs, encounter_type=self.etype_var.get(),
+                    category=self.cat_var.get())
+                for r in new_rows:
+                    self._add_tracker_row(r)
+                result["added"] = len(new_rows)
             win.destroy()
 
         def do_skip():
