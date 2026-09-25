@@ -78,6 +78,19 @@ Active Associates*.xlsx
 *Navarre*.xlsx
 *Associates*.xlsx
 EMR Easy Enter Worksheets.xlsx
+# Descriptions written since the workbook was last updated; the builder loads it
+# alongside the workbook. Same standing as the workbook itself: Dane's file, his
+# to merge, untracked. Reusable text about no one -- but it is not reviewed line
+# by line the way library_candidates.md is, so it stays out of git.
+library_additions.json
+# A batch dictated in chat, waiting for names. No names or locations in it by
+# design, but it is a day's real encounters and it is Dane's working file.
+dictated_batch.json
+dictated_batch.*.json
+# Assessment worksheets written by pa_workbook.py: field text for a day's real
+# PAs, keyed by ref. No names in them by design, same as pa_writeups.md, and
+# untracked for the same reason -- they log real encounters on a real date.
+pa_worksheets*.xlsx
 # Backups of roster.xlsx (real roster PII), like roster.xlsx itself. Broad on
 # purpose: any roster.<something>.xlsx is a dated/labelled copy of the real roster.
 # (roster_template.xlsx uses an underscore, so it is NOT caught by this.)
@@ -167,3 +180,8 @@ encounter_log*.csv
 encounters.bak*.csv
 pa_follow_ups*.csv
 new_descriptions_for_library*.csv
+# Dane's own encounter working folder, dropped into the project 2026-09-25. The
+# workbook in it is de-identified per ENCOUNTER_INTAKE.md, but this is also where
+# the ref -> name cheat sheet lives, and that IS the re-identification key. Ignore
+# the whole directory: match on what the folder IS, not on one file's name.
+Encounter Work/
