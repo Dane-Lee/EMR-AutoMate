@@ -8,6 +8,9 @@ This is the second EMR AutoMate function. It is normally launched from
 `emr_automate.py` (the menu popup), but can also be run directly:
 
     python update_employees.py                 # normal update run (reads roster.xlsx)
+    python update_employees.py --report         # READ-ONLY: reconcile, change nothing
+    python update_employees.py --capture-sites  # READ-ONLY: which worksite? how many?
+    python update_employees.py --from-hc <xlsx> # convert an HC export to roster.xlsx
     python update_employees.py --capture        # STEP-0: capture the edit form HTML
     python update_employees.py --capture "Last, First"   # capture a specific person
 
@@ -47,7 +50,7 @@ from playwright.async_api import async_playwright, Page
 # Reuse the proven helpers + config from the encounter tool (importing is safe — its
 # __main__ guard means nothing runs on import).
 import phi_redact
-from name_match import (NICKNAMES, loose_name, normalize_name,
+from name_match import (NICKNAMES, loose_name, normalize_name, quoted_nickname,
                         split_last_first)
 from phi_redact import ph, pv  # ph(name) / pv(field value) — PHI-safe stdout
 
@@ -88,6 +91,8 @@ NICKNAME_CSV = os.path.join(_HERE, "nickname_candidates.csv")
 # (e.g. '...EHS Manager...'). None = always write the full value.
 MAX_IDENTIFIER_LEN = 30
 IDENTIFIER_SHORTENED_CSV = os.path.join(_HERE, "identifier_shortened.csv")
+# New hires with no department/division yet — the work-area worklist after an import.
+NO_WORK_AREA_CSV = os.path.join(_HERE, "work_area_todo.csv")
 
 # EMR employees that no active-roster row matched (i.e. not in the roster file).
 EMR_NOT_IN_ROSTER_CSV = os.path.join(_HERE, "emr_not_in_roster.csv")
@@ -123,12 +128,25 @@ MATCH_COLS = ["identifier", "name"]
 #     to "Male" and add the person to gender_review_needed.csv for manual review.
 #   • Date of Birth / Phone / Email: not edited (DOB is never available).
 # The other fillers/helpers below are kept so columns can be re-enabled later.
+# The Preventative Medical Schedule block at the foot of the edit form. Its date input
+# does not exist until "Employee Signature Attained?" is answered Yes — MEASURED
+# 2026-08-27: the block contained 0 datepickers before the click and exactly 1 after,
+# an empty enabled `input[placeholder='Date']`.
+SIG_YES_LABEL = "label[for='isWellnessCoachingConsentSigned-yes']"
+SIG_YES_RADIO = "input#isWellnessCoachingConsentSigned-yes"
+SIG_DATE_SELECTOR = ".preventative-bottom-container input[placeholder='Date']"
+
+
 EDIT_FIELD_SPECS = [
     {"col": "first_name",     "kind": "text",   "selector": "input[name='firstName']",            "label": "First Name"},
     {"col": "middle_name",    "kind": "text",   "selector": "input[name='middleName']",           "label": "Middle Name"},
     {"col": "last_name",      "kind": "text",   "selector": "input[name='lastName']",             "label": "Last Name"},
     {"col": "new_identifier", "kind": "text",   "selector": "input[name='badgeNumber']",          "label": "Identifier"},
     {"col": "date_of_hire",   "kind": "date",   "selector": "input[placeholder='Date of Hire']",  "label": "Date of Hire"},
+    # Preventative Medical Schedule date (2026-08-27). Answers "Employee Signature
+    # Attained?" Yes to reveal the field, then sets it. Skipped entirely unless the
+    # sheet carries this column with a value — see set_signature_date().
+    {"col": "schedule_date",  "kind": "sigdate", "selector": SIG_DATE_SELECTOR,                   "label": "Preventative Medical Schedule Date"},
 ]
 
 # Columns the roster carries for OTHER tools but this one never edits in the EMR.
@@ -159,15 +177,40 @@ def _norm_header(h):
 # 'William'). 'Bill', 'Bob' and 'Peggy' silently failed. One copy, both tools.
 
 
-def norm_identifier(s):
-    """Normalize an identifier/badge for matching.
+# format_identifier composes 'ID-Title-Shift' with NO spaces around the hyphens, and the
+# ID itself may carry a '-NN' suffix. Anchor on the ID at the front: a leading run of
+# digits, optionally '-NN', followed by a hyphen and anything at all. Same shape
+# encounter_builder._IDENT_RE anchors on, from the other end.
+#
+# The tail must contain a NON-DIGIT to count as a job title. Without that guard,
+# '11111-01' (an Associate ID whose own suffix is '-01') reduces to '11111' — the regex
+# happily reads the '01' as the title and throws away half the ID.
+_ID_FROM_COMPOSED = re.compile(r"^(\d+(?:-\d+)?)-(?=.*\D).+$")
 
-    Drops a leading '#' and any ' - <job title>' suffix, so the dashboard badge
-    '# 12345 - Materials Handler', the edit-form value '12345 - Materials Handler',
-    and a plain '12345' in the sheet all match on '12345'.
+
+def norm_identifier(s):
+    """Normalize an identifier/badge to the bare Associate ID for matching.
+
+    Handles all three shapes this system produces:
+        '# 12345 - Materials Handler'  (EMR dashboard badge)   -> '12345'
+        '12345 - Materials Handler'    (edit-form value)       -> '12345'
+        '12345-Technician II-1st'      (format_identifier)     -> '12345'
+        '11111-01-Technician II-1st'   (ID with a -NN suffix)  -> '11111-01'
+        '12345'                        (roster identifier)     -> '12345'
+
+    MEASURED 2026-08-27: the third shape was NOT handled, and it is the one Dane types
+    into the badge field when clearing the identifier worklist. Splitting on ' - '
+    (space-hyphen-space) finds nothing in it, so the whole 'ID-Title-Shift' string
+    became the index key while the roster side still reduced to '12345' — identifier
+    matching failed for every badge that had been corrected. Those people fell through
+    to name matching, and the ones whose names were ambiguous or spelled differently
+    were reported as 'not in EMR' despite existing with a correct badge. Fixing badges
+    made the report worse, which is exactly backwards.
     """
     s = str(s or "").strip().lstrip("#").strip()
-    return s.split(" - ")[0].strip()
+    s = s.split(" - ")[0].strip()
+    m = _ID_FROM_COMPOSED.match(s)
+    return m.group(1) if m else s
 
 
 def cell_to_str(value, is_date=False):
@@ -289,10 +332,63 @@ def load_roster_xlsx(path):
 # Hire Date. This converts it into the tool's roster.xlsx schema and builds the
 # Identifier as  ID-Title-Shift  (e.g. "12345-Technician II-2nd").
 
+# Each field lists every header HC has used for it, most recent first. The report
+# builder renames columns between exports — the 8-25-26 Navarre export calls them
+# "Name" and "Position Title" where the 7-17-26 one said "Associate Name" and "Primary
+# Position" — and a single expected spelling turns that into "source missing expected
+# column(s)" with no hint that the data is right there under another name.
 HC_COLS = {
-    "id": "Associate ID", "name": "Associate Name", "shift": "Shift",
-    "position": "Primary Position", "hire": "Most Recent Hire Date",
+    "id":       ("Associate ID",),
+    "name":     ("Name", "Associate Name"),
+    "shift":    ("Shift",),
+    "position": ("Position Title", "Primary Position"),
+    "hire":     ("Most Recent Hire Date",),
 }
+
+
+def _find_col(header, names):
+    """Index of the first accepted header spelling, or -1."""
+    for name in names:
+        if name in header:
+            return header.index(name)
+    return -1
+
+
+def _existing_work_areas(path):
+    """{identifier: (department, division)} from the roster being replaced.
+
+    Department and Division are DANE'S work, not the HC export's — he set them by hand
+    for every employee and no export has ever carried them for Navarre. An import that
+    simply rewrites the file throws away all 261 of them, which is how a roster gets
+    silently emptied of the one column encounter_builder needs."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        grid = list(ws.iter_rows(values_only=True))
+        wb.close()
+    except Exception:
+        return {}
+    if not grid:
+        return {}
+    header = [str(h or "").strip() for h in grid[0]]
+    try:
+        i_id = header.index("identifier")
+        i_dept = header.index("department")
+        i_div = header.index("division")
+    except ValueError:
+        return {}
+    areas = {}
+    for r in grid[1:]:
+        if i_id >= len(r) or not r[i_id]:
+            continue
+        dept = str(r[i_dept]).strip() if i_dept < len(r) and r[i_dept] else ""
+        div = str(r[i_div]).strip() if i_div < len(r) and r[i_div] else ""
+        if dept or div:
+            areas[_hc_id_str(r[i_id])] = (dept, div)
+    return areas
 NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
@@ -311,10 +407,33 @@ def first_last_to_last_first(name):
     return f"{last}, {firsts}"
 
 
+# The shift vocabulary is CLOSED — '1st' / '2nd' / '3rd'. encounter_builder parses the
+# shift back out of new_identifier and colours its roster rail by it (SHIFT_RAIL), and
+# intake_grid offers the same three. Anything else is not a shift this system knows.
+_SHIFT_ORDINALS = {
+    "1": "1st", "1st": "1st", "first": "1st", "a": "1st",
+    "2": "2nd", "2nd": "2nd", "second": "2nd", "b": "2nd",
+    "3": "3rd", "3rd": "3rd", "third": "3rd", "c": "3rd",
+}
+
+
 def _shift_ordinal(shift):
-    """'2ND Shift' -> '2nd'; '1ST Shift' -> '1st'. '' if unrecognized."""
-    tok = str(shift or "").strip().split()
-    return tok[0].lower() if tok else ""
+    """'2ND Shift' -> '2nd'; '1st Shift' -> '1st'; bare '1' -> '1st'. '' if unknown.
+
+    MEASURED 2026-08-25: the 8-25-26 Navarre export writes the Shift column as a bare
+    '1' or '2', where the 7-17-26 export wrote '1ST Shift'. The old version of this
+    function lowercased the first token and returned it, so '1' became the identifier
+    suffix '-1' instead of '-1st' — silently, with no warning, because nothing checked
+    the result against the vocabulary. encounter_builder then found no shift on any of
+    259 people and every roster row lost its shift rail.
+
+    Every token is checked, not just the first, so 'Shift 2' works as well as '2 Shift'.
+    """
+    for token in str(shift or "").strip().split():
+        hit = _SHIFT_ORDINALS.get(token.lower().strip(".,"))
+        if hit:
+            return hit
+    return ""
 
 
 def _position_title(position):
@@ -422,8 +541,8 @@ def import_hc_roster(src_path, out_path=None):
         return 0, ["source file is empty"]
 
     header = [str(h or "").strip() for h in grid[0]]
-    ci = {k: (header.index(v) if v in header else -1) for k, v in HC_COLS.items()}
-    missing = [HC_COLS[k] for k, j in ci.items() if j < 0]
+    ci = {k: _find_col(header, names) for k, names in HC_COLS.items()}
+    missing = [" / ".join(HC_COLS[k]) for k, j in ci.items() if j < 0]
     if missing:
         return 0, [f"source missing expected column(s): {', '.join(missing)}"]
 
@@ -433,6 +552,17 @@ def import_hc_roster(src_path, out_path=None):
     dept_j = header.index("Department") if "Department" in header else -1
     div_j = header.index("Division") if "Division" in header else -1
     has_area = dept_j >= 0 and div_j >= 0
+
+    # Carry the previous roster's work areas forward, ALWAYS — not only when the export
+    # lacks the columns. MEASURED 2026-08-25: the 8-25-26 export gained Department and
+    # Division but had them filled for 150 of 259 rows, so treating "the column exists"
+    # as "the column is authoritative" would have replaced 243 known work areas with
+    # 150. The merge is per FIELD: a value in the export wins, a blank falls back to
+    # what Dane already set. Keyed on Associate ID, so a rename or a shift change keeps
+    # the person's area.
+    carried = _existing_work_areas(out_path) or _existing_work_areas(ROSTER_XLSX)
+    kept = 0
+    no_area = []
 
     warnings = []
     shortened = []  # (name, full, trimmed) when an identifier had to be cut to fit
@@ -470,8 +600,36 @@ def import_hc_roster(src_path, out_path=None):
             warnings.append(f"Row {n} ({name_lf}): unrecognized Shift '{g('shift')}'")
         dept = str(r[dept_j]).strip() if has_area and dept_j < len(r) and r[dept_j] else ""
         div = str(r[div_j]).strip() if has_area and div_j < len(r) and r[div_j] else ""
+        was_blank = not (dept and div)
+        if was_blank and aid in carried:
+            prev_dept, prev_div = carried[aid]
+            dept = dept or prev_dept        # per field: the export wins when it has a
+            div = div or prev_div           # value, the old roster fills the gaps
+            if dept or div:
+                kept += 1
+        if not (dept and div):
+            no_area.append(name_lf)
         osh.append([aid, name_lf, new_id, hire_s, dept, div])
         written += 1
+
+    if carried:
+        warnings.append(f"work areas carried forward from the previous roster for "
+                        f"{kept} of {written} employees")
+        gone = len(set(carried) - {_hc_id_str(g_id) for g_id in
+                                   (r[ci['id']] for r in grid[1:]
+                                    if ci['id'] < len(r) and r[ci['id']] not in (None, ""))})
+        if gone:
+            warnings.append(f"{gone} employee(s) had a work area in the previous roster "
+                            f"but are not in this export — off the active roster")
+    if no_area:
+        warnings.append(f"{len(no_area)} employee(s) have NO department/division — "
+                        f"new hires needing a work area; see "
+                        f"{os.path.basename(NO_WORK_AREA_CSV)}")
+        with open(NO_WORK_AREA_CSV, "w", newline="", encoding="utf-8-sig") as nf:
+            nw = csv.writer(nf)
+            nw.writerow(["employee", "department", "division"])
+            for nm in no_area:
+                nw.writerow([nm, "", ""])
 
     out.save(out_path)
 
@@ -490,9 +648,18 @@ def import_hc_roster(src_path, out_path=None):
 # ROSTER INDEX + MATCHER
 # ─────────────────────────────────────────────
 
-# Matches each preloaded dashboard roster row and captures id (UUID), name, badge.
+# Matches each preloaded dashboard roster row and captures id (UUID), the class list,
+# name, and badge.
+#
+# The EMR marks a deactivated employee with an `inactive` class on this same div —
+# MEASURED 2026-08-18 across the saved dashboard captures in debug/, every one of which
+# had 735 `class="details  "` rows and 203 `class="details  inactive"` rows (938 total).
+# The class list is captured because that flag is the whole difference between "should
+# be deactivated" and "Dane already deactivated this person last quarter". Until
+# 2026-08-19 the pattern discarded it, so emr_not_in_roster.csv reported both as one
+# undifferentiated pile.
 _ROW_RE = re.compile(
-    r'<div id="([0-9a-fA-F-]{36})" class="details[^"]*">'      # UUID
+    r'<div id="([0-9a-fA-F-]{36})" class="(details[^"]*)">'    # UUID + class list
     r'.*?<span class="name">([^<]*)</span>'                     # "Last, First"
     r'<span class="badge-id">([^<]*)</span>',                   # "# 12345 - Title"
     re.DOTALL,
@@ -513,15 +680,20 @@ def parse_roster_html(html):
     """Parse the dashboard's preloaded roster HTML into a list of employee dicts.
 
     Pure function (no Playwright) so it can be tested offline against a saved
-    dashboard capture. Each item: {uuid, name, identifier, badge}.
+    dashboard capture. Each item: {uuid, name, identifier, badge, active}.
+
+    `active` is False when the row carries the EMR's `inactive` class. Split on
+    whitespace rather than a substring test so a future class like "inactive-pending"
+    can't silently read as inactive.
     """
     people = []
-    for uuid, name, badge in _ROW_RE.findall(html):
+    for uuid, classes, name, badge in _ROW_RE.findall(html):
         people.append({
             "uuid": uuid,
             "name": name.strip(),
             "identifier": parse_badge_identifier(badge),
             "badge": badge.strip(),
+            "active": "inactive" not in classes.split(),
         })
     return people
 
@@ -530,16 +702,26 @@ def build_index(people):
     """Build lookup maps from parsed roster people.
 
     Returns {by_identifier: {norm_id: uuid}, by_name: {norm_name: [uuids]},
-             people: [...]}.
+             by_uuid: {uuid: person}, people: [...]}.
     """
-    by_identifier, by_name, by_name_loose = {}, {}, {}
+    by_identifier, by_name, by_name_loose, by_name_nick = {}, {}, {}, {}
     for p in people:
         if p["identifier"]:
             by_identifier[norm_identifier(p["identifier"])] = p["uuid"]
         by_name.setdefault(normalize_name(p["name"]), []).append(p["uuid"])
         by_name_loose.setdefault(loose_name(p["name"]), []).append(p["uuid"])
+        # The name the EMR says this person actually goes by. loose_name() drops the
+        # quoted nickname and KEEPS the formal name, so 'Last, Robert "Bob"' reduces to
+        # 'last robert' — and a roster that carries the short form as the first name
+        # ('Last, Bob') never meets it. MEASURED 2026-08-27: that mismatch alone was
+        # reported as a missing EMR account for someone who plainly had one.
+        nick = quoted_nickname(p["name"])
+        if nick:
+            last, _first = split_last_first(p["name"])
+            by_name_nick.setdefault(normalize_name(f"{last}, {nick}"), []).append(p["uuid"])
     return {"by_identifier": by_identifier, "by_name": by_name,
-            "by_name_loose": by_name_loose, "people": people}
+            "by_name_loose": by_name_loose, "by_name_nick": by_name_nick,
+            "by_uuid": {p["uuid"]: p for p in people}, "people": people}
 
 
 def resolve_employee(row, index):
@@ -558,7 +740,13 @@ def resolve_employee(row, index):
         if len(uuids) == 1:
             return uuids[0], "name"
         if len(uuids) > 1:
-            return None, f"ambiguous name — {len(uuids)} employees match '{row.get('name')}'"
+            # The name is NOT in this string. It is printed as `ph(label) — {info}`,
+            # and ph() redacts the label while info goes out verbatim — so a name
+            # embedded here walks straight past the redaction that the rest of the
+            # line relies on. Found 2026-08-25, when a --report run printed six real
+            # employees to a console Claude reads. The count is the useful part; the
+            # Employee # on the same line says which row it is.
+            return None, f"ambiguous name — {len(uuids)} EMR records share this name"
 
     # Fallback: forgiving match that ignores EMR nicknames/suffixes (e.g. the roster's
     # 'Smith, Jane' vs the EMR's 'Smith, Jane "JJ"'). Only accept a unique hit.
@@ -570,9 +758,119 @@ def resolve_employee(row, index):
         if len(uuids) == 1:
             return uuids[0], "name (loose)"
         if len(uuids) > 1:
-            return None, f"ambiguous name — {len(uuids)} employees match '{row.get('name')}'"
+            # The name is NOT in this string. It is printed as `ph(label) — {info}`,
+            # and ph() redacts the label while info goes out verbatim — so a name
+            # embedded here walks straight past the redaction that the rest of the
+            # line relies on. Found 2026-08-25, when a --report run printed six real
+            # employees to a console Claude reads. The count is the useful part; the
+            # Employee # on the same line says which row it is.
+            return None, f"ambiguous name — {len(uuids)} EMR records share this name"
+
+    # Last resort: the roster carries the SHORT form as the first name, while the EMR
+    # spells the formal name out with the short form quoted after it. loose_name()
+    # cannot bridge that — it drops the quotes and keeps the formal name. Only a unique
+    # hit is accepted, same as every other step.
+    nick_key = normalize_name(row.get("name"))
+    if nick_key:
+        uuids = list(dict.fromkeys(index.get("by_name_nick", {}).get(nick_key, [])))
+        if len(uuids) == 1:
+            return uuids[0], "name (nickname)"
+        if len(uuids) > 1:
+            return None, f"ambiguous name — {len(uuids)} EMR records share this name"
 
     return None, "no match (identifier/name not found in this worksite)"
+
+
+# ─────────────────────────────────────────────
+# RECONCILIATION (roster <-> EMR, both directions)
+# ─────────────────────────────────────────────
+# Shared by run() and run_report() so the two can never drift. Nothing here touches
+# the browser or edits a record — it is pure diffing over an already-loaded index.
+
+def resolve_all(rows, index):
+    """Resolve every roster row. Returns (resolved, unmatched).
+
+    resolved:  [(row, uuid, matched_by)]
+    unmatched: [(row, label, reason)]
+    """
+    resolved, unmatched = [], []
+    for row in rows:
+        uuid, info = resolve_employee(row, index)
+        label = row.get("name") or row.get("identifier") or "(row)"
+        if uuid:
+            resolved.append((row, uuid, info))
+        else:
+            unmatched.append((row, label, info))
+    return resolved, unmatched
+
+
+def write_roster_not_in_emr(unmatched):
+    """Roster rows that matched nobody in the EMR. Returns (new_hires, ambiguous).
+
+    Two piles, because they need opposite actions:
+      - "not in EMR" -> a genuinely-new hire to ADD manually.
+      - "ambiguous"  -> already in the EMR; set a badge to disambiguate.
+    """
+    new_hires = [(r, l) for r, l, info in unmatched if info.startswith("no match")]
+    ambiguous = [(r, l, info) for r, l, info in unmatched
+                 if info.startswith("ambiguous")]
+    with open(ROSTER_NOT_IN_EMR_CSV, "w", newline="", encoding="utf-8-sig") as rf:
+        rw = csv.writer(rf)
+        rw.writerow(["name", "identifier", "date_of_hire", "reason"])
+        for r, l in new_hires:
+            rw.writerow([r.get("name", ""), r.get("identifier", ""),
+                         r.get("date_of_hire", ""), "not in EMR — add manually"])
+        for r, l, info in ambiguous:
+            rw.writerow([r.get("name", ""), r.get("identifier", ""),
+                         r.get("date_of_hire", ""),
+                         "ambiguous — in EMR, set the badge to disambiguate"])
+    return new_hires, ambiguous
+
+
+def write_emr_not_in_roster(index, matched_uuids):
+    """EMR records no active-roster row matched. Returns (all_of_them, still_active).
+
+    This is the deactivation worklist. People already marked inactive in the EMR are
+    kept in the file (so the numbers reconcile) but flagged and sorted to the bottom —
+    they need no action, and burying them in the same list is what made the previous
+    report far longer than the work it actually represented.
+    """
+    not_in_roster = [p for p in index["people"] if p["uuid"] not in matched_uuids]
+    still_active = [p for p in not_in_roster if p.get("active", True)]
+    with open(EMR_NOT_IN_ROSTER_CSV, "w", newline="", encoding="utf-8-sig") as nf:
+        nw = csv.writer(nf)
+        nw.writerow(["name", "identifier", "uuid", "active_in_emr", "action"])
+        for p in sorted(not_in_roster,
+                        key=lambda q: (not q.get("active", True), q["name"].lower())):
+            act = p.get("active", True)
+            nw.writerow([p["name"], p["identifier"], p["uuid"],
+                         "yes" if act else "no",
+                         "review — deactivate?" if act else "already inactive — no action"])
+    return not_in_roster, still_active
+
+
+def report_rehires(index, resolved):
+    """Roster rows that matched an EMR record marked inactive — i.e. likely rehires.
+
+    Reported only; reactivating is Dane's call and this tool never does it.
+    """
+    return [(row, uuid) for row, uuid, _ in resolved
+            if not index["by_uuid"].get(uuid, {}).get("active", True)]
+
+
+def print_emr_not_in_roster(index, resolved):
+    """Write the deactivation worklist and summarize it. Returns still_active."""
+    all_rows, still_active = write_emr_not_in_roster(
+        index, {uuid for _, uuid, _ in resolved})
+    already = len(all_rows) - len(still_active)
+    print(f"EMR records with no active-roster row: {len(all_rows)} "
+          f"({len(still_active)} still active, {already} already inactive) "
+          f"— see {EMR_NOT_IN_ROSTER_CSV}")
+    rehires = report_rehires(index, resolved)
+    if rehires:
+        print(f"  note: {len(rehires)} roster row(s) matched an INACTIVE EMR "
+              f"record — likely rehires to reactivate.")
+    return still_active
 
 
 # ─────────────────────────────────────────────
@@ -716,6 +1014,64 @@ def _same_date(a, b):
     return da is not None and da == db
 
 
+async def set_signature_date(page: Page, value: str):
+    """Answer the signature question Yes and set the schedule date. Returns (old, ok).
+
+    ⚠️ Answering Yes is a factual assertion that the employee signed — it is not a data
+    copy like the other fields. It is only ever done for rows whose sheet carries a
+    value in this column, so the sheet is the consent record.
+
+    Once answered, the EMR LOCKS the whole block: on an already-signed record both
+    radios come back `disabled` and the date is read-only. Measured on the first record
+    checked, which had disabled=True/checked=True and a filled date. So this can fill a
+    blank one and can never correct an existing one — those stay hand-work.
+    """
+    radio = page.locator(SIG_YES_RADIO).first
+    try:
+        await radio.scroll_into_view_if_needed(timeout=4000)
+        disabled = await radio.is_disabled(timeout=3000)
+        checked = await radio.is_checked(timeout=3000)
+    except Exception as e:
+        print(f"  WARNING: signature question not found: {str(e).splitlines()[0]}")
+        return "", False
+
+    if disabled:
+        existing = ""
+        try:
+            existing = (await page.locator(SIG_DATE_SELECTOR).first
+                        .input_value(timeout=2000)).strip()
+        except Exception:
+            pass
+        # Already answered: the EMR locks the block, so neither this nor Dane can
+        # change the date. Returning None marks it a SKIP rather than a failure — a
+        # locked record is the expected state for anyone already done, and counting it
+        # as a failure would trip the run's own alarm on normal data.
+        return existing, None
+
+    if not checked:
+        try:
+            await page.locator(SIG_YES_LABEL).first.click(timeout=6000)
+            await page.wait_for_timeout(700)
+        except Exception as e:
+            print(f"  WARNING: couldn't answer Yes: {str(e).splitlines()[0]}")
+            return "", False
+
+    try:
+        await page.locator(SIG_DATE_SELECTOR).first.wait_for(state="visible", timeout=5000)
+    except Exception:
+        print("  WARNING: the schedule date field never appeared")
+        return "", False
+
+    old = ""
+    try:
+        old = (await page.locator(SIG_DATE_SELECTOR).first
+               .input_value(timeout=2000)).strip()
+    except Exception:
+        pass
+    ok = await _set_date(page, SIG_DATE_SELECTOR, value, original=old)
+    return old, ok
+
+
 async def _set_date(page: Page, selector: str, value: str, original: str = "") -> bool:
     """Set the Date of Hire field. The input won't accept typing — clicking it opens an
     rc-calendar. We open it, navigate to the target month/year via the year/month
@@ -737,8 +1093,26 @@ async def _set_date(page: Page, selector: str, value: str, original: str = "") -
             await inp.scroll_into_view_if_needed(timeout=4000)
             await inp.click(timeout=6000)
 
-            cal = page.locator(".rc-calendar:visible").first
+            # Scope the calendar to THIS input's own .ati-datepicker.
+            #
+            # MEASURED 2026-08-28: the form holds two ati-datepickers and a CLOSED one
+            # is not hidden — it is parked at `left:-999px; top:-1077px` with no
+            # `rc-calendar-picker-hidden` class. Playwright treats that as VISIBLE (it
+            # has a bounding box), so `.rc-calendar:visible` matched both calendars and
+            # `.first` could drive the parked one: year read, day clicked, OK pressed,
+            # and the field never touched. Blank fields failed 57/59 that way, while
+            # pre-filled ones "passed" only because the value already matched before
+            # any of it mattered.
+            cal = inp.locator(
+                "xpath=ancestor::div[contains(@class,'ati-datepicker')][1]"
+            ).locator(".rc-calendar").first
             await cal.wait_for(state="visible", timeout=6000)
+            # ...and wait for it to actually be ON SCREEN, not parked.
+            for _ in range(20):
+                box = await cal.bounding_box()
+                if box and box["x"] > -500 and box["y"] > -500:
+                    break
+                await page.wait_for_timeout(100)
             await page.wait_for_timeout(300)  # let the header + day grid render
 
             cur_year = int((await cal.locator(".rc-calendar-year-select")
@@ -762,6 +1136,18 @@ async def _set_date(page: Page, selector: str, value: str, original: str = "") -
 
             cell = cal.locator(
                 f"td[role='gridcell'][title='{title}']:not(.rc-calendar-disabled-cell)")
+            if await cell.count() == 0:
+                # The title format ('January 5, 2026') is an ASSUMPTION — phi_redact
+                # scrubs those titles out of every capture, so it has never been read
+                # back from a real page. Fall back to the day NUMBER within the current
+                # month, excluding the grey leading/trailing cells that belong to the
+                # neighbouring months.
+                cell = cal.locator(
+                    "td[role='gridcell']"
+                    ":not(.rc-calendar-last-month-cell)"
+                    ":not(.rc-calendar-next-month-cell)"
+                    ":not(.rc-calendar-disabled-cell)"
+                ).filter(has_text=re.compile(rf"^\s*{target.day}\s*$"))
             if await cell.count() == 0:
                 cancel = cal.locator(".cancel-btn")
                 if await cancel.count() > 0:
@@ -843,6 +1229,10 @@ async def fill_employee_form(page: Page, row: dict):
         elif kind == "date":
             old = await _read_text(page, selector)
             ok = await _set_date(page, selector, new, original=old)
+        elif kind == "sigdate":
+            old, ok = await set_signature_date(page, new)
+            if ok is None:
+                continue      # already answered and locked — not a failure, just skip
         elif kind == "phone":
             old = await _read_phone(page)
             ok = await _fill_phone(page, new)
@@ -963,7 +1353,9 @@ async def load_index(page: Page):
     await page.wait_for_timeout(1500)
     await snap(page, "EMP_01_dashboard")
     people = parse_roster_html(await page.content())
-    print(f"Loaded {len(people)} employees from the dashboard roster.")
+    active = sum(1 for p in people if p.get("active", True))
+    print(f"Loaded {len(people)} employees from the dashboard roster "
+          f"({active} active, {len(people) - active} already inactive).")
     return build_index(people)
 
 
@@ -971,10 +1363,86 @@ async def load_index(page: Page):
 # STEP-0 CAPTURE MODE
 # ─────────────────────────────────────────────
 
-async def run_capture(target_name=None):
+async def read_worksite(page: Page) -> str:
+    """The worksite named in the dashboard header, or "" if it can't be read.
+
+    STRUCTURE VERIFIED 2026-08-19 from the saved dashboard captures:
+        <div class="info-container"> <div class="logo">..</div>
+          <div class="details"><span class="title" title="..">..</span>
+                               <span class="location">..</span></div>
+    Note this header <div class="details"> is NOT an employee row — the rows carry an
+    id= and live under .employee-list, which is why _ROW_RE requires the id.
+
+    Whether the dashboard's employee list is SCOPED to this worksite is exactly the
+    open question; this only reports what the header says, so a report can be labelled
+    with the site it was taken under.
+    """
+    try:
+        el = page.locator(".app-header .info-container .details")
+        if not await el.count():
+            return ""
+        title = (await el.locator(".title").inner_text()).strip()
+        loc = (await el.locator(".location").inner_text()).strip()
+        return f"{title} — {loc}" if loc else title
+    except Exception:
+        return ""
+
+
+async def run_capture_sites():
+    """READ-ONLY probe: what worksite is selected, and what does the switcher offer?
+
+    Dane's EMR account contains employees from other ATI sites, and he does not know
+    how many sites there are (2026-08-19). Until we know whether the dashboard roster
+    is one site or all of them, emr_not_in_roster.csv cannot be trusted as a
+    deactivation list — an active employee at another site would appear on it.
+
+    This opens the group switcher and snaps the page so the real markup can be read,
+    the same way _ROW_RE and the edit-form selectors were derived. It clicks one menu
+    icon and saves scrubbed HTML. It writes no CSV and edits nothing.
+    """
+    async with async_playwright() as p:
+        context, page = await _open_browser(p)
+        try:
+            index = await load_index(page)
+            people = index["people"]
+            active = sum(1 for q in people if q["active"])
+            site = await read_worksite(page)
+            print(f"\nHeader worksite: {site or '(could not read)'}")
+            print(f"Dashboard roster:  {len(people)} rows "
+                  f"({active} active, {len(people) - active} inactive)")
+            await snap(page, "EMP_sites_before")
+
+            icon = page.locator(".nav-container .nav-item.group-icon")
+            if not await icon.count():
+                print("No .group-icon in the header — snapping the header anyway.")
+            else:
+                try:
+                    await icon.click()
+                    await page.wait_for_timeout(2000)
+                    print("Opened the group/site switcher.")
+                except Exception as e:
+                    print(f"Could not open the switcher: {e}")
+            await snap(page, "EMP_sites_menu")
+
+            popup("Captured the site switcher to ./debug (scrubbed).\n\n"
+                  f"Header worksite: {site or '(unreadable)'}\n"
+                  f"Dashboard roster: {len(people)} rows, {active} active\n\n"
+                  "Nothing was changed. Tell Claude the worksite name and how many "
+                  "sites the switcher lists.",
+                  title="EMR AutoMate — site probe")
+        finally:
+            await context.close()
+
+
+async def run_capture(target_name=None, target_uuid=None):
     """STEP 0: open one employee's /editemployee form and snap it (no save).
 
     Run this once so we can finalize the real input selectors + Save button.
+
+    `target_uuid` picks the record by the EMR's own key. Added 2026-08-26 for the
+    deactivation work: the worklist there carries a uuid for every row and an
+    identifier for almost none (427 of 511 blank), and choosing by name would mean
+    reading names out of a PHI worklist just to aim a capture.
     """
     async with async_playwright() as p:
         context, page = await _open_browser(p)
@@ -984,7 +1452,12 @@ async def run_capture(target_name=None):
             if not people:
                 print("No employees found on the dashboard — can't capture.")
                 return
-            if target_name:
+            if target_uuid:
+                match = next((p_ for p_ in people if p_["uuid"] == target_uuid), None)
+                if not match:
+                    print(f"uuid {pv(target_uuid)} is not on the dashboard roster.")
+                    return
+            elif target_name:
                 key = normalize_name(target_name)
                 match = next((p_ for p_ in people if normalize_name(p_["name"]) == key), None)
                 if not match:
@@ -1000,6 +1473,319 @@ async def run_capture(target_name=None):
             await snap(page, "EMP_editform_capture")
             popup("Captured the edit form to ./debug.\n\nReview the *_EMP_editform_capture "
                   "files, then click OK to close.", title="EMR AutoMate — capture done")
+        finally:
+            await context.close()
+
+
+# ─────────────────────────────────────────────
+# DEACTIVATION (2026-08-26)
+# ─────────────────────────────────────────────
+
+# The three Employee Status options, read off the form by Dane 2026-08-26. Picked by
+# VISIBLE TEXT, because that is what the control exposes — the underlying value is a
+# UUID held in React state and never appears in the DOM.
+STATUS_ACTIVE = "Active"
+STATUS_INACTIVE = "Inactive"
+STATUS_CANDIDATE = "Candidate"
+
+DEACTIVATE_XLSX = os.path.join(_HERE, "EMR Deactivate Worklist.xlsx")
+# Stop after this many consecutive failures. The 2026-06-30 run logged 420 save-failures
+# out of 633 rows: whatever was wrong was wrong for every record, and grinding through
+# the rest of the list learned nothing it did not know after the fifth.
+DEACTIVATE_BREAKER = 5
+
+
+async def set_employee_status(page: Page, want: str) -> bool:
+    """Set the Employee Status react-select to `want`, by visible option text.
+
+    Targeted through `input[name='employeeStatus']` rather than the field label: the
+    label next to this control captured as 10 characters, which is not "Employee
+    Status" (15), and the input's name attribute is a fact rather than an inference.
+    """
+    container = (
+        "xpath=//input[@name='employeeStatus']"
+        "/ancestor::div[contains(@class,'container')][1]"
+    )
+    try:
+        control = page.locator(f"{container}//div[contains(@class,'ati-react-select__control')]").first
+        await control.scroll_into_view_if_needed(timeout=4000)
+        await control.click(timeout=6000)
+        await page.wait_for_timeout(400)
+        option = page.locator(
+            f"//div[contains(@class,'ati-react-select__option')]"
+            f"[normalize-space(.)='{want}']").first
+        await option.click(timeout=6000)
+        await page.wait_for_timeout(300)
+        shown = (await page.locator(
+            f"{container}//div[contains(@class,'ati-react-select__single-value')]"
+            ).first.inner_text(timeout=3000)).strip()
+        if shown != want:
+            print(f"  WARNING: status reads '{shown}' after picking '{want}'")
+            return False
+        return True
+    except Exception as e:
+        print(f"  WARNING: couldn't set status: {str(e).splitlines()[0]}")
+        return False
+
+
+def load_deactivate_worklist(path=None):
+    """Read the worklist. Returns [{uuid, name}] for rows marked Deactivate.
+
+    Keyed on uuid: `identifier` is blank on 427 of the 511 reviewed records, so it
+    cannot be the key, and matching by name would re-introduce the ambiguity that made
+    six of them unresolvable in the first place.
+    """
+    import openpyxl
+    path = path or DEACTIVATE_XLSX
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    grid = list(ws.iter_rows(values_only=True))
+    wb.close()
+    head = [str(h or "").strip() for h in grid[0]]
+    i_uuid = head.index("uuid")
+    i_name = head.index("name") if "name" in head else -1
+    i_dec = head.index("decision") if "decision" in head else -1
+    out = []
+    for r in grid[1:]:
+        if i_uuid >= len(r) or not r[i_uuid]:
+            continue
+        if i_dec >= 0 and str(r[i_dec] or "").strip().lower() != "deactivate":
+            continue
+        out.append({"uuid": str(r[i_uuid]).strip(),
+                    "name": str(r[i_name]).strip() if i_name >= 0 and r[i_name] else ""})
+    return out
+
+
+def already_deactivated(log_path=None):
+    """UUIDs the audit log says were already set to Inactive — the --resume set."""
+    log_path = log_path or LOG_CSV
+    done = set()
+    if not os.path.exists(log_path):
+        return done
+    try:
+        with open(log_path, encoding="utf-8-sig", newline="") as fh:
+            for row in csv.DictReader(fh):
+                if (row.get("field") == "employeeStatus"
+                        and row.get("status") == "updated"
+                        and row.get("new_value") == STATUS_INACTIVE):
+                    done.add((row.get("uuid") or "").strip())
+    except (OSError, csv.Error):
+        pass
+    return done
+
+
+async def run_deactivate(dry_run=True, limit=None, path=None):
+    """Set Employee Status to Inactive for every uuid on the worklist.
+
+    dry_run opens each record and reports the status it FINDS, saving nothing. That is
+    the only way to confirm the selector works against real records before it is
+    pointed at 483 of them.
+    """
+    people = load_deactivate_worklist(path)
+    done = already_deactivated()
+    todo = [p for p in people if p["uuid"] not in done]
+    print(f"Worklist: {len(people)} row(s); {len(done)} already logged Inactive; "
+          f"{len(todo)} to do.")
+    if limit:
+        todo = todo[:limit]
+        print(f"Limited to the first {len(todo)}.")
+    if not todo:
+        return
+    if dry_run:
+        print("DRY RUN — nothing will be saved.\n")
+    else:
+        if not popup(
+                f"About to set {len(todo)} employee record(s) to Inactive.\n\n"
+                "This writes to the live EMR. Continue?",
+                title="EMR AutoMate — deactivate", yes_no=True):
+            print("Cancelled — nothing was changed.")
+            return
+
+    ok = failed = skipped = 0
+    consecutive = 0
+    log_fh, writer = (None, None) if dry_run else _log_writer()
+    async with async_playwright() as p:
+        context, page = await _open_browser(p)
+        try:
+            for n, person in enumerate(todo, 1):
+                label = ph(person["name"] or person["uuid"])
+                try:
+                    await page.goto(f"{BASE_URL}/editemployee?id={person['uuid']}")
+                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_timeout(1200)
+                    current = (await page.locator(
+                        "xpath=//input[@name='employeeStatus']"
+                        "/ancestor::div[contains(@class,'container')][1]"
+                        "//div[contains(@class,'ati-react-select__single-value')]"
+                        ).first.inner_text(timeout=4000)).strip()
+                except Exception as e:
+                    print(f"{n:4d}. {label}: could not open — "
+                          f"{str(e).splitlines()[0]}")
+                    failed += 1
+                    consecutive += 1
+                    if consecutive >= DEACTIVATE_BREAKER:
+                        print(f"\nSTOPPED: {consecutive} failures in a row.")
+                        break
+                    continue
+
+                if current == STATUS_INACTIVE:
+                    print(f"{n:4d}. {label}: already Inactive — skipped")
+                    log_rows(writer, person["name"], person["uuid"], "uuid",
+                             "skipped", note="already inactive") if writer else None
+                    skipped += 1
+                    consecutive = 0
+                    continue
+
+                if dry_run:
+                    print(f"{n:4d}. {label}: status is '{current}' -> would set "
+                          f"'{STATUS_INACTIVE}'")
+                    consecutive = 0
+                    continue
+
+                set_ok = await set_employee_status(page, STATUS_INACTIVE)
+                saved = await save_employee(page) if set_ok else False
+                if set_ok and saved:
+                    print(f"{n:4d}. {label}: {current} -> {STATUS_INACTIVE}")
+                    log_rows(writer, person["name"], person["uuid"], "uuid",
+                             "updated",
+                             changes=[("employeeStatus", current, STATUS_INACTIVE, True)])
+                    ok += 1
+                    consecutive = 0
+                else:
+                    print(f"{n:4d}. {label}: FAILED")
+                    log_rows(writer, person["name"], person["uuid"], "uuid",
+                             "save-failed",
+                             changes=[("employeeStatus", current, STATUS_INACTIVE, False)])
+                    failed += 1
+                    consecutive += 1
+                    if consecutive >= DEACTIVATE_BREAKER:
+                        print(f"\nSTOPPED: {consecutive} failures in a row. "
+                              f"Re-run with --resume once the cause is fixed.")
+                        break
+        finally:
+            await context.close()
+            if log_fh:
+                log_fh.close()      # flush every row: a killed run must still be resumable
+
+    print(f"\n{'Would deactivate' if dry_run else 'Deactivated'}: {ok}   "
+          f"skipped: {skipped}   failed: {failed}")
+    if not dry_run:
+        print(f"Logged to {os.path.basename(LOG_CSV)}. "
+              f"Re-run with --resume to pick up where this stopped.")
+
+
+async def run_capture_signature(target_uuid=None):
+    """Open an employee's edit form, click YES on the signature question, and snap it.
+
+    STEP 0 for the Preventative Medical Schedule date. That field does not exist in the
+    DOM until the yes/no question near the bottom is answered Yes, so a plain edit-form
+    capture cannot show it. The form carries exactly one yes/no radio pair
+    (`isWellnessCoachingConsentSigned`, defaulting to 'no') and six
+    `scheduleDetails[N].checked` boxes; which of those the revealed date belongs to is
+    the thing this capture exists to establish.
+
+    NOTHING IS SAVED. The radio is clicked in the page and the context is closed, so
+    the record is left exactly as it was found.
+    """
+    async with async_playwright() as p:
+        context, page = await _open_browser(p)
+        try:
+            index = await load_index(page)
+            people = index["people"]
+            match = next((p_ for p_ in people if p_["uuid"] == target_uuid), None) \
+                if target_uuid else (people[0] if people else None)
+            if not match:
+                print("No such employee on the dashboard — can't capture.")
+                return
+
+            # On a record that is already signed the whole block comes back DISABLED,
+            # so clicking it times out and the capture shows nothing new. Scan until an
+            # unanswered one turns up — that is the state the writer has to handle.
+            candidates = [match] + [p_ for p_ in people[:40] if p_ is not match]
+            found = None
+            for person in candidates[:15]:
+                await page.goto(f"{BASE_URL}/editemployee?id={person['uuid']}")
+                await page.wait_for_load_state("networkidle")
+                await page.wait_for_timeout(1500)
+                radio = page.locator("input#isWellnessCoachingConsentSigned-yes").first
+                try:
+                    disabled = await radio.is_disabled(timeout=3000)
+                    checked = await radio.is_checked(timeout=3000)
+                except Exception:
+                    continue
+                print(f"  {ph(person['name'])}: yes-radio disabled={disabled} checked={checked}")
+                if not disabled:
+                    found = person
+                    break
+            if not found:
+                print("\nEvery record checked has the signature block DISABLED.")
+                await snap(page, "EMP_sig_after")
+                popup("All records checked already have the signature answered and the "
+                      "block locked.\n\nNothing was saved. Click OK.",
+                      title="EMR AutoMate — signature capture")
+                return
+
+            print(f"\nUnanswered record found: {ph(found['name'])}")
+            await snap(page, "EMP_sig_before")
+            try:
+                lbl = page.locator("label[for='isWellnessCoachingConsentSigned-yes']").first
+                await lbl.scroll_into_view_if_needed(timeout=4000)
+                await lbl.click(timeout=6000)
+                await page.wait_for_timeout(1200)
+                print("Clicked YES on the signature question.")
+            except Exception as e:
+                print(f"Couldn't click YES: {str(e).splitlines()[0]}")
+            await snap(page, "EMP_sig_after")
+            popup("Captured the form before and after clicking YES.\n\n"
+                  "NOTHING was saved — close the browser without saving.\n\nClick OK.",
+                  title="EMR AutoMate — signature capture")
+        finally:
+            await context.close()
+
+
+async def run_capture_status(target_uuid=None):
+    """Open an employee's edit form, OPEN the Employee Status dropdown, and snap it.
+
+    STEP 0 for deactivation. The status field is an ati-react-select backed by
+    `<input name="employeeStatus" type="hidden">` whose value is a 36-char UUID, and
+    react-select renders its options only while open — so a plain edit-form capture
+    shows the control and none of the choices. Nothing is selected or saved here; the
+    point is to learn the field's label and the exact option wording, because
+    `react_select()` picks by visible text and a guessed option string is exactly the
+    kind of guess that has broken this project before.
+    """
+    async with async_playwright() as p:
+        context, page = await _open_browser(p)
+        try:
+            index = await load_index(page)
+            people = index["people"]
+            match = next((p_ for p_ in people if p_["uuid"] == target_uuid), None) \
+                if target_uuid else (people[0] if people else None)
+            if not match:
+                print("No such employee on the dashboard — can't capture.")
+                return
+
+            print(f"Opening edit form for: {ph(match['name'])}  ({pv(match['uuid'])})")
+            await page.goto(f"{BASE_URL}/editemployee?id={match['uuid']}")
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(2500)
+            await snap(page, "EMP_status_before")
+
+            control = page.locator(
+                "xpath=//input[@name='employeeStatus']"
+                "/ancestor::div[contains(@class,'container')][1]"
+                "//div[contains(@class,'ati-react-select__control')]").first
+            try:
+                await control.scroll_into_view_if_needed(timeout=4000)
+                await control.click(timeout=6000)
+                await page.wait_for_timeout(1200)
+                print("Opened the Employee Status dropdown.")
+            except Exception as e:
+                print(f"Couldn't open the status dropdown: {str(e).splitlines()[0]}")
+            await snap(page, "EMP_status_menu")
+            popup("Captured the Employee Status dropdown to ./debug.\n\n"
+                  "NOTHING was selected or saved. Click OK to close.",
+                  title="EMR AutoMate — status capture")
         finally:
             await context.close()
 
@@ -1020,6 +1806,25 @@ async def run_capture_datepicker(target_name=None):
             if target_name:
                 key = normalize_name(target_name)
                 match = next((x for x in people if normalize_name(x["name"]) == key), None)
+
+            if match is None:
+                # Find one with a BLANK Date of Hire. MEASURED 2026-08-28: _set_date
+                # succeeds only on records whose date is ALREADY correct (50/50) and
+                # fails on every blank one (57/59) — so a capture of a pre-filled
+                # calendar shows the case that works, not the case that is broken.
+                for person in people[:25]:
+                    await page.goto(f"{BASE_URL}/editemployee?id={person['uuid']}")
+                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_timeout(1400)
+                    try:
+                        val = (await page.locator("input[placeholder='Date of Hire']")
+                               .first.input_value(timeout=3000)).strip()
+                    except Exception:
+                        continue
+                    print(f"  {ph(person['name'])}: Date of Hire {'BLANK' if not val else 'filled'}")
+                    if not val:
+                        match = person
+                        break
             match = match or people[0]
             print(f"Opening edit form for {ph(match['name'])} ({pv(match['uuid'])})")
             await page.goto(f"{BASE_URL}/editemployee?id={match['uuid']}")
@@ -1139,38 +1944,25 @@ async def run(roster_path=None):
             index = await load_index(page)
 
             # Resolve every row first so we can report match coverage up front.
-            resolved, unmatched = [], []
-            for row in rows:
-                uuid, info = resolve_employee(row, index)
-                label = row.get("name") or row.get("identifier") or "(row)"
-                if uuid:
-                    resolved.append((row, uuid, info))
-                else:
-                    unmatched.append((row, label, info))
-                    log_rows(writer, label, "", "", "skipped", note=info)
+            resolved, unmatched = resolve_all(rows, index)
+            for row, label, info in unmatched:
+                log_rows(writer, label, "", "", "skipped", note=info)
 
             print(f"\nMatched {len(resolved)}, unmatched {len(unmatched)}.")
             for row, label, info in unmatched:
                 print(f"  skip: {ph(label)} — {info}")
 
-            # Split the unmatched into the two piles Dane cares about:
-            #   • "not in EMR" → genuinely-new hires to ADD manually.
-            #   • "ambiguous"  → already in the EMR, just need a badge to disambiguate.
-            new_hires = [(r, l) for r, l, info in unmatched if info.startswith("no match")]
-            ambiguous = [(r, l, info) for r, l, info in unmatched
-                         if info.startswith("ambiguous")]
-            with open(ROSTER_NOT_IN_EMR_CSV, "w", newline="", encoding="utf-8-sig") as rf:
-                rw = csv.writer(rf)
-                rw.writerow(["name", "identifier", "date_of_hire", "reason"])
-                for r, l in new_hires:
-                    rw.writerow([r.get("name", ""), r.get("identifier", ""),
-                                 r.get("date_of_hire", ""), "not in EMR — add manually"])
-                for r, l, info in ambiguous:
-                    rw.writerow([r.get("name", ""), r.get("identifier", ""),
-                                 r.get("date_of_hire", ""),
-                                 "ambiguous — in EMR, set the badge to disambiguate"])
+            # BOTH reconciliation reports are written HERE, before the confirmation
+            # popup and before a single record is edited. They depend only on the
+            # roster and the loaded index, and the edit loop changes neither — so
+            # writing them early means a run cancelled at the popup, or killed halfway
+            # by an expired session, still leaves Dane the full worklists. Until
+            # 2026-08-19 emr_not_in_roster.csv was written at the very END of run(),
+            # so answering "No" to the confirmation produced no worklist at all.
+            new_hires, ambiguous = write_roster_not_in_emr(unmatched)
             print(f"  → {len(new_hires)} new hire(s) to add manually, "
                   f"{len(ambiguous)} ambiguous — see {ROSTER_NOT_IN_EMR_CSV}")
+            print_emr_not_in_roster(index, resolved)
 
             if not resolved:
                 popup("No roster rows matched an employee in this worksite. "
@@ -1259,17 +2051,6 @@ async def run(roster_path=None):
                 print(f"⚠ Date of Hire failed to persist for {len(date_misses)} — "
                       f"see {DATE_NOT_PERSISTED_CSV}")
 
-            # EMR employees that no roster row matched (i.e. not in the active roster).
-            matched_uuids = {uuid for _, uuid, _ in resolved}
-            not_in_roster = [p for p in index["people"] if p["uuid"] not in matched_uuids]
-            with open(EMR_NOT_IN_ROSTER_CSV, "w", newline="", encoding="utf-8-sig") as nf:
-                nw = csv.writer(nf)
-                nw.writerow(["name", "identifier", "uuid"])
-                for p in not_in_roster:
-                    nw.writerow([p["name"], p["identifier"], p["uuid"]])
-            print(f"EMR employees not in the roster: {len(not_in_roster)} — "
-                  f"see {EMR_NOT_IN_ROSTER_CSV}")
-
             print(f"\nDone. Updated {updated}, skipped {len(unmatched)}, errors {errored}.")
             print(f"Audit log: {LOG_CSV}")
             if gender_review:
@@ -1286,6 +2067,112 @@ async def run(roster_path=None):
                   title="EMR AutoMate — done")
         finally:
             fh.close()
+            await context.close()
+
+
+IDENTIFIER_DIFF_XLSX = os.path.join(_HERE, "EMR Identifier Updates.xlsx")
+
+
+async def run_identifier_diff(roster_path=None):
+    """READ-ONLY: who in the EMR has an identifier that differs from the roster's.
+
+    One dashboard load answers it — the roster rows the EMR preloads already carry the
+    badge (`# 12345 - Title`), so no edit form is opened and no record is read
+    individually. Writes a worklist of the mismatches and changes nothing.
+
+    Needed because a saved dashboard capture cannot answer this: phi_redact scrubs both
+    the name and the badge out of debug/*.html by design, so the question can only be
+    asked against a live page.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    rows = prepare_roster(roster_path)
+    async with async_playwright() as p:
+        context, page = await _open_browser(p)
+        try:
+            index = await load_index(page)
+            site = await read_worksite(page)
+            print(f"Worksite in the header: {site or '(could not read)'}")
+
+            differs, same, unmatched = [], 0, 0
+            for row in rows:
+                uuid, how = resolve_employee(row, index)
+                if not uuid:
+                    unmatched += 1
+                    continue
+                person = index["by_uuid"].get(uuid) or {}
+                emr_id = (person.get("identifier") or "").strip()
+                want = str(row.get("new_identifier") or "").strip()
+                if not want:
+                    continue
+                if norm_identifier(emr_id) == norm_identifier(want):
+                    same += 1
+                else:
+                    differs.append([row.get("name", ""), emr_id, want,
+                                    "blank in EMR" if not emr_id else "differs", how])
+        finally:
+            await context.close()
+
+    print(f"\nmatched and identical : {same}")
+    print(f"matched and DIFFERENT : {len(differs)}")
+    print(f"unmatched (no EMR row): {unmatched}")
+
+    out = openpyxl.Workbook(); o = out.active; o.title = "Identifiers"
+    cols = ["name", "identifier in EMR", "identifier it should be", "why", "matched by", "done?"]
+    o.append(cols)
+    for r in sorted(differs, key=lambda x: (x[3], str(x[0]))):
+        o.append(r + [""])
+    for c, w in enumerate([30, 34, 34, 16, 14, 8], start=1):
+        cell = o.cell(row=1, column=c)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F3864")
+        o.column_dimensions[get_column_letter(c)].width = w
+    o.freeze_panes = "A2"
+    o.auto_filter.ref = "A1:F%d" % (len(differs) + 1)
+    out.save(IDENTIFIER_DIFF_XLSX)
+    print(f"Wrote {os.path.basename(IDENTIFIER_DIFF_XLSX)} ({len(differs)} row(s)). "
+          f"Report only — nothing in the EMR was changed.")
+
+
+async def run_report(roster_path=None):
+    """Read-only reconciliation: roster <-> EMR, both directions. Edits NOTHING.
+
+    Runs the same matching and writes the same two worklists a real update run does,
+    but the browser is only ever read from: no edit form is opened, no record is
+    saved, and employee_updates_log.csv (an audit of *edits*) is left alone. Use this
+    when the question is "who is in the EMR who should not be?" rather than "push the
+    roster into the EMR".
+    """
+    rows = prepare_roster(roster_path)
+
+    async with async_playwright() as p:
+        context, page = await _open_browser(p)
+        try:
+            index = await load_index(page)
+            site = await read_worksite(page)
+            print(f"Worksite in the header: {site or '(could not read)'}")
+            resolved, unmatched = resolve_all(rows, index)
+
+            print(f"\nMatched {len(resolved)}, unmatched {len(unmatched)}.")
+            for row, label, info in unmatched:
+                print(f"  skip: {ph(label)} — {info}")
+
+            new_hires, ambiguous = write_roster_not_in_emr(unmatched)
+            print(f"  → {len(new_hires)} new hire(s) to add manually, "
+                  f"{len(ambiguous)} ambiguous — see {ROSTER_NOT_IN_EMR_CSV}")
+            still_active = print_emr_not_in_roster(index, resolved)
+
+            print("\nReport only — nothing in the EMR was changed.")
+            popup(f"Reconciliation report done. Nothing was changed.\n\n"
+                  f"Active in the EMR but NOT on the roster: {len(still_active)}\n"
+                  f"   review these in {os.path.basename(EMR_NOT_IN_ROSTER_CSV)}\n\n"
+                  f"New hires to add manually: {len(new_hires)}\n"
+                  f"Ambiguous (need a badge): {len(ambiguous)}\n"
+                  f"   see {os.path.basename(ROSTER_NOT_IN_EMR_CSV)}",
+                  title="EMR AutoMate — report only")
+        finally:
             await context.close()
 
 
@@ -1307,7 +2194,32 @@ async def run_nicknames():
 
 
 if __name__ == "__main__":
-    if "--capture" in sys.argv:
+    if "--capture-signature" in sys.argv:
+        i = sys.argv.index("--capture-signature")
+        uuid = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
+        asyncio.run(run_capture_signature(uuid))
+    elif "--identifiers" in sys.argv:
+        asyncio.run(run_identifier_diff())
+    elif "--deactivate" in sys.argv:
+        # Dry run is the DEFAULT. Writing to 483 medical records is opt-in, by a flag
+        # you have to type, on top of the confirmation popup.
+        live = "--go" in sys.argv
+        limit = None
+        if "--limit" in sys.argv:
+            i = sys.argv.index("--limit")
+            limit = int(sys.argv[i + 1]) if len(sys.argv) > i + 1 else None
+        asyncio.run(run_deactivate(dry_run=not live, limit=limit))
+    elif "--capture-status" in sys.argv:
+        i = sys.argv.index("--capture-status")
+        uuid = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
+        asyncio.run(run_capture_status(uuid))
+    elif "--capture-uuid" in sys.argv:
+        i = sys.argv.index("--capture-uuid")
+        if len(sys.argv) <= i + 1:
+            print("Usage: python update_employees.py --capture-uuid <uuid>")
+            sys.exit(1)
+        asyncio.run(run_capture(target_uuid=sys.argv[i + 1]))
+    elif "--capture" in sys.argv:
         i = sys.argv.index("--capture")
         name = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
         asyncio.run(run_capture(name))
@@ -1326,6 +2238,15 @@ if __name__ == "__main__":
         print(f"Wrote {n} row(s) to {ROSTER_XLSX}")
         for w in warnings:
             print("  note:", w)
+    elif "--capture-sites" in sys.argv:
+        asyncio.run(run_capture_sites())
+    elif "--report" in sys.argv:
+        # --report may be combined with --roster to diff a targeted sheet.
+        path = None
+        if "--roster" in sys.argv:
+            i = sys.argv.index("--roster")
+            path = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
+        asyncio.run(run_report(path))
     elif "--roster" in sys.argv:
         i = sys.argv.index("--roster")
         if len(sys.argv) <= i + 1:

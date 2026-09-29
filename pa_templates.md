@@ -171,6 +171,12 @@ READ. THAT. WASTES. MY. FUCKING. TIME."*
    This is the same rule as 1–4 applied to controlled values, and it took until 2026-09-08
    to notice it was being broken on every page that had one.
 
+6. **Put pasteable text in a code fence.** Dane, 2026-09-11: *"those code-fenced responses
+   are so much better to work with."* The chat UI puts a copy button on a fenced block and
+   nothing on a blockquote, so a blockquote makes him select the text by hand, every field,
+   on every page. Field text goes in a fence; controlled values stay inline (`Low`,
+   `musculoskeletal acute`) — those are picked from a list, not pasted.
+
 The through-line: he is entering real records while you write, usually behind. Anything that
 isn't content is something he has to read past to reach content, and hedging reads as being
 managed rather than helped.
@@ -205,9 +211,22 @@ His edit:
 > food and eating closer to the start of their shift.
 
 **The original complaint carries over from the initial PA — restating it wastes the field.**
-Open with `EIS followed up with EE [ timeframe ].` and go straight to what is different now.
 The older templates below still carry `… regarding the episode…` openers; his 2026-08-28 edit
-is the newer preference.
+cut that down to the bare opener, and 2026-09-15 cut the opener too.
+
+⚠️ **NO OPENER AT ALL — Dane, 2026-09-15.** *"Since it is a Follow-Up Assessment, we
+don't need to state 'EIS followed up with EE [ time frame ].' that information is a given.
+Please never give me that within the description response ever again."*
+
+The form already says it is a follow-up and already carries the date. **Start with what is
+different now**, in the EE's report:
+
+> EE said the low back pain has improved but is still present. EE states that they notice
+> it most when standing up after sitting at their desk for a while.
+
+This supersedes the 2026-08-28 opener above and kills the `[ timeframe ]` slot with it —
+the slot only ever existed to fill that sentence. Every follow-up template further down
+this file still opens with the old sentence; drop it when reusing one.
 
 Name the complaint again only when the follow-up needs to distinguish it — several
 concurrent issues, or a specific finding being compared.
@@ -240,6 +259,36 @@ Two things to take from that:
 2. **Observation is functional capacity testing, not visual inspection.** What did the EE
    do, under what load, and what happened. Writing "no visible swelling, EE walked
    normally" misreads the field — that was the error before this was supplied.
+
+#### What he FELT vs what he SAW — Dane's edit, 2026-09-11
+
+A draft put a visible rib shift and uneven hip heights in Palpation, alongside the
+tenderness. He moved them:
+
+> **palpation** — Tenderness present over the SI joint bilaterally.
+>
+> **observation** — Rib cage visibly shifted to the left with uneven hip heights. EE
+> experienced discomfort standing up out of a chair.
+
+**Palpation is only what his hands found** — tenderness, tissue texture, trigger points,
+passive ROM end-feel. Nothing that was seen belongs there.
+
+**Observation takes the visible findings too**, not just the functional test: structural
+asymmetry, alignment, swelling he can see, and then what the EE did and what happened.
+The 2026-08-24 rule above still holds against the *original* error — Observation is not a
+field for "EE walked normally, no swelling noted" filler — but a real structural finding
+he observed is Observation's, and it leads the field, with the capacity test after it.
+
+**Side comes from him.** The same draft slotted `[ left / right ]` on the SI tenderness;
+it was bilateral. A side is a finding, not an inference from the rest of the picture.
+
+**Drop "when testing the capacity of the affected region."** Dane, 2026-09-11: *"of
+course we were testing it. that's how we got the palpation or observation. it's redundant
+to say it in the description there."* The phrase came out of his own 2026-08-24 kettlebell
+sample and had been pasted onto every Observation since. Write what the EE did and what
+happened, and stop:
+
+> EE experienced discomfort standing up out of a chair.
 
 ### Page 3 — Root Cause Analysis
 
@@ -401,6 +450,14 @@ answers, not writing text.
 
 **Three subsections** (Dane, 2026-08-28): **Coaching Details** · **First Aid** ·
 **Contribution Type**.
+
+⚠️ **Where protective recommendations sits — Dane, 2026-09-11:** *"Requires Protective
+Recommendations comes immediately after #7 and before First Aid Provided."* So the
+conditional revealed by `capable of all essential job tasks` = Yes is answered **inside
+Coaching Details, as item 8**, and First Aid follows it. Answer the page in that order:
+
+    1-7 Coaching Details · 8 Requires protective recommendations · 9 First Aid provided
+    → Contribution Type (initial PA only) → Further Notes/Instruction to Employee
 
 Every field marked ● below is **required** (red asterisk in the UI). An unanswered one
 blocks the page.
@@ -564,6 +621,36 @@ A **restriction** is a limit on what an employee may do; it carries OSHA recorda
 work-restriction consequences. A **protective recommendation** is a suggestion the employee
 may adopt. Writing one as the other creates a compliance problem for ATI and for the
 employee. **This is the highest-stakes text in the whole assessment.**
+
+### ⚠️ What it is FOR — Dane, 2026-09-21
+
+The verb rule below is necessary and not sufficient. A permissive sentence can still fail
+by being about the wrong thing. What he was given for a head injury:
+
+> ❌ Encourage attention to overhead clearance at station 240 when standing up from a bend.
+
+*"This is not a good protective recommendation. It isn't even a protective recommendation."*
+What he wanted:
+
+> ✅ Look for opportunities for microbreaks throughout shift. These can be used to check
+> for signs of an increase in symptoms and to provide additional rest to the affected area.
+
+**A protective recommendation protects the AFFECTED AREA while the employee keeps
+working.** Rest for it, breaks that let symptoms be checked, changes of position that take
+load off it. Its subject is the injury and the rest of the shift.
+
+**Stopping the injury happening again is not this field.** Watch the bar, wear the goggles,
+use the crane — those are hazard controls and they belong in safety coaching. The same
+draft made the mistake twice in one batch (a head strike and an eye splash), which is how
+to spot it: if the sentence would still make sense written the day BEFORE the injury, it
+is prevention, not protection.
+
+**The second sentence stays here.** Saying what the microbreaks are used for is the
+content of the recommendation, so the "cut the purpose clause" rule from 2026-09-15 does
+not apply to this field.
+
+`Look for opportunities for …` is his own opener and is permissive in the way that
+matters — an opportunity, not an instruction. It joins the verb table below.
 
 ### The pattern, derived from Dane's approved tab
 
@@ -780,6 +867,39 @@ Plain language applies here — this is narrative about what was covered, not ex
 Permissive phrasing is kept anyway given how close this page sits to the
 protective-recommendation line.
 
+### ⚠️ Stop at the core sentence — Dane's three edits, 2026-09-15
+
+He cut the same thing out of three fields in one pass: the trailing `including X, Y and Z`
+list, and the clause saying what it was for. His versions, verbatim:
+
+> **ergonomic** — EIS work with EE on ergonomic adjustments at their work station to reduce
+> stress on the shoulder and neck.
+>
+> **mobility** — EIS reminded EE of the job-specific mobility options and reviewed neck and
+> shoulder mobility work.
+>
+> **wellness** — EIS and EE discussed what could be done over the next few days to keep the
+> shoulder and neck improving.
+
+What went, in each case:
+
+| drafted tail | cut |
+|---|---|
+| `… including work height, reach distance, and material positioning.` | the enumeration |
+| `… to keep the tension easing.` | the purpose clause |
+| `… including use of heat, OTC meds, and stretching.` | the enumeration |
+
+1. **`worked with EE on`, not `educated EE on`**, for the ergonomic field. He is describing
+   what they did together, not a lecture he delivered.
+2. **This narrows the 2026-08-28 "more covered" rework**, which asked the wellness field to
+   NAME interventions (icing, anti-inflammatories, elevation). That still holds where the
+   interventions were actually the encounter — acute aftercare, the thumb follow-up's
+   "heat and gentle ROM work". It does not license appending a plausible list to a
+   maintenance follow-up. When in doubt, hand him the core sentence and let him ask for
+   the detail.
+3. It is the same rule as "the second sentence is usually the one to cut", applied inside
+   one sentence: a tail that explains or enumerates is the part he deletes.
+
 ### Educated employee on total health and wellness — ✅ REWORKED 2026-08-28
 
 Approved by Dane 2026-08-28 for an acute injury case. **Two lengths; he takes the fuller one
@@ -814,6 +934,22 @@ anti-inflammatories. etc."*
    few days" — this is aftercare for a specific event, not general health education.
 4. **Only what he actually covered.** Swap the interventions to match the case; a chronic
    or non-injury encounter will not involve icing at all.
+
+#### His words for the interventions — Dane, 2026-09-11
+
+*"I never write 'over-the-counter anti-inflammatories' or anything like that. I would say
+'OTC meds' and leave it at that."* And on a drafted "gentle stretching": *"you don't need
+to specify gentle, just 'stretching' is good enough."*
+
+| Don't write | Write |
+|---|---|
+| over-the-counter anti-inflammatories | OTC meds |
+| gentle stretching | stretching |
+
+`OTC meds` is also the Symptom Self-Management chip's own wording, so this keeps page 3
+and page 5 saying the same thing. The qualifier rule is about padding an intervention
+name — where he supplied the wording himself (his own "gentle ROM work", 2026-08-28),
+keep his.
 
 #### Refined 2026-08-28 (thumb follow-up)
 
@@ -960,9 +1096,25 @@ transfer-and-referral consequences, made by the person who did the exam.
   found by text-matching a description is not an absence found by examining a person.
 - ❌ **Never infer.** Nothing here is derived from mechanism or diagnosis.
 
-The three intake columns map one-to-one onto the three lists below: `Red Flag Signs?` →
-Signs and Physical Findings · `Red Flag Mechanism of Injury?` → Mechanism of Injury ·
-`Red Flag Symptoms?` → Symptoms.
+### The page has FOUR sections, in this order — Dane, 2026-09-11
+
+*"the category order is and always will be ... never give me answers out of order for this
+page again."*
+
+1. **Red Flag Signs** → Signs and Physical Findings
+2. **Red Flag Mechanism of Injury** → Mechanism of Injury
+3. **Red Flag Symptoms** → Symptoms
+4. **Red Flag Personal Conditions** → the PMH list at the bottom of this section
+
+Two things this corrects. The page has **four** fields, not the three recorded here since
+2026-08-24 — Personal Conditions was written up as a "consider as indicated" aside rather
+than a field on the form. And the order is the form's, not the reference sheet's: the
+sheet leads with Mechanism-adjacent material and the earlier notes followed it, which put
+answers on screen in an order he had to re-sort while entering.
+
+Give all four, in this order, every time. A section the account raises nothing for is
+still listed in its place — surfacing nothing is not the same as writing it negative, and
+the count is what carries the threshold.
 
 ### Each section needs one explanation — Dane, 2026-08-28
 

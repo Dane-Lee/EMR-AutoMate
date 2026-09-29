@@ -85,6 +85,14 @@ UI_CHROME = [
     "Office", "Office Visit", "Task", "Task Assessment",
     "Work Readiness", "Work Readiness Assessment",
     "Select Assessment Type", "Ergonomic Assessment", "Follow-Up", "Follow Up",
+    # Employee Status options on /editemployee (Dane, 2026-08-26). The status field is
+    # an ati-react-select over `<input name="employeeStatus" type="hidden">`; a capture
+    # of the open dropdown returned three options as [redacted:6] / [redacted:8] /
+    # [redacted:9], so the one fact the capture existed to establish was the one fact
+    # scrubbed out of it — the same trap as the assessment tiles above. Deactivation
+    # picks "Inactive" BY VISIBLE TEXT, so this list is what makes a future capture
+    # able to confirm the option still reads that way.
+    "Active", "Inactive", "Candidate", "Employee Status",
     # Generic table/UI words
     "of", "to", "and", "or", "Show", "Hide", "All", "None", "Required", "Optional",
 ]
