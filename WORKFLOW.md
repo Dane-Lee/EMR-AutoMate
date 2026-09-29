@@ -1,8 +1,14 @@
 # The daily workflow
 
-How a day's coaching encounters get into the EMR. No dictation, no Copilot, no AI
-anywhere in the path — the batch is built by checking names off the roster on this PC,
-and the only host anything talks to is the EMR itself.
+How a day's coaching encounters get into the EMR. No dictation and no Copilot — the
+batch is built by checking names off the roster on this PC, and the automation talks to
+nothing but the EMR.
+
+One optional step does leave the machine: if you tick **"Note only"** on a description
+or leave the coaching type as **"— suggest it from my note —"**, pressing Write sends
+those notes to a headless `claude -p` and pastes the answers back into the batch. Notes
+only — no names, no dates, no departments. Skip it and nothing is sent at all. The rules
+and the guards are in `CLAUDE.md`.
 
 ## Who sees what
 

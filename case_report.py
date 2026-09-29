@@ -216,7 +216,12 @@ PAGE_SIZE_RADIO = 'input[name="ati-paginator-item-dropdown"]'
 # the forbidden side is what must never be trimmed.
 _ENC_DATE_PREFIX = "enc"
 _ENC_DATE_KEYS = {"date", "dateofencounter", "encounterdate", "dateofservice",
-                  "servicedate", "visitdate", "casedate", "dos", "encdate"}
+                  "servicedate", "visitdate", "casedate", "dos", "encdate",
+                  # The case summary page's own per-encounter date label is 15
+                  # characters and is not "Encounter Date" (14, which does survive
+                  # scrubbing on that page's detail block). These are the 15-char
+                  # readings; an accept-list entry that matches nothing costs nothing.
+                  "assessmentdate", "dateperformed", "performeddate", "datecompleted"}
 _FORBIDDEN_LABELS = {"dob", "dateofbirth", "birthdate", "birth", "bday", "born",
                      "id", "identifier", "badge", "badgeid", "empid", "employeeid",
                      "ssn", "mrn"}
@@ -257,11 +262,11 @@ def date_shape(value):
     return re.sub(r"[a-z]", "a", re.sub(r"[A-Z]", "A", s))
 
 
-def diagnose_dates(rows):
+def diagnose_dates(rows, where="the Case List"):
     """Why did no date come out? Labels and value shapes only — never a value."""
     labels = Counter(tuple(r.get("profile_labels") or ()) for r in rows)
     matched = [r for r in rows if r.get("date_label")]
-    out = ["WHY NO DATE CAME OUT OF THE CASE LIST", "",
+    out = [f"WHY NO DATE CAME OUT OF {where.upper()}", "",
            f"rows read: {len(rows)}",
            f"rows where a date LABEL matched: {len(matched)}", "",
            "LABELS FOUND IN THE EMPLOYEE CELL (column labels, not patient data)"]
@@ -359,6 +364,82 @@ def _profile_pairs(profile):
     return pairs
 
 
+# ─────────────────────────────────────────────
+# THE CASE SUMMARY PAGE — measured 2026-09-09
+# ─────────────────────────────────────────────
+# `/cases/summary?id=<uuid>`. This is where a follow-up's OWN date lives, and it is the
+# whole reason the report was under-counting: the Case List shows a case's first date
+# and nothing else, so a follow-up entered last week on a February case is invisible
+# there. Captured 2026-09-09 (`debug/20260909_*_CASE_summary.html`).
+#
+#   .detail-row  .row-cell  p.field-label / p.field-value      the CASE's own fields
+#       — "Encounter Date", "Location", "Department", "Division", "Category", "Shift"
+#         all survive scrubbing, so those labels are confirmed
+#   .data-row                                                  ONE PER ENCOUNTER
+#       .data-row-cell   p.label (empty) + .chipButton .chipText     the type chip
+#       .data-row-cell   p.label / p.value                           <- the date pair
+#       .data-row-cell   p.label / p.value.text-ellipsis
+#       .data-row-cell   p.label "Location" / p.value.text-ellipsis
+#       .data-row-cell.width-25   the row menu
+#
+# ⚠️ `.data-row` is ALSO the Case List's row class. The two are told apart by their
+# children — `.data-row-cell` here, `.data-row-col` there — not by the class itself.
+#
+# The date is matched by label exactly as on the Case List, through the same
+# _is_encounter_date_label, so `dob` can no more be read as a date here than there.
+
+CASE_SUMMARY_ROW_CELL = "data-row-cell"
+
+
+def parse_case_encounters(html):
+    """The encounters listed on one case's summary page, newest date wins nothing.
+
+    Returns one dict per encounter row, same shape as a Case List row minus the
+    employee (the summary page doesn't repeat it — the caller carries it across).
+    """
+    tree = _DomTree()
+    tree.feed(html)
+    tree.close()
+
+    out = []
+    for row in _find(tree.root, "data-row"):
+        cells = list(_find(row, CASE_SUMMARY_ROW_CELL))
+        if not cells:
+            continue                     # a Case List row, not a summary row
+        pairs = []
+        for cell in cells:
+            label = _first(cell, "label")
+            value = _first(cell, "value")
+            if label is None or value is None:
+                continue
+            pairs.append((_label_key(_text(label)), _text(label), _text(value)))
+
+        enc_raw, enc_label = "", ""
+        for key, label, value in pairs:
+            if _is_encounter_date_label(key):
+                enc_raw, enc_label = value, label
+                break
+        location = next((v for k, _, v in pairs if k == "location"), "")
+
+        out.append({
+            "date": parse_date(enc_raw),
+            "date_raw": enc_raw,
+            "date_label": enc_label,
+            "case_type": _text(_first(row, "chipText")),
+            "coaching_type": "",
+            "name": "",                  # filled in by the caller
+            "status": "",
+            "case_id": "",
+            "follow_ups": 0,
+            "location": location,
+            "extra": "",
+            "extra_label": "",
+            "href": "",
+            "profile_labels": [label for _, label, _ in pairs],
+        })
+    return out
+
+
 def parse_case_rows(html):
     """The Case List page -> row dicts. Structure measured 2026-09-08 (see above).
 
@@ -377,6 +458,11 @@ def parse_case_rows(html):
 
     rows = []
     for row in _find(table, "data-row"):
+        # The case SUMMARY page uses the same `data-row` class for its encounter rows.
+        # The two are told apart by their children — `data-row-col` here, `data-row-cell`
+        # there — so require the Case List's shape rather than trusting the class.
+        if not next(_find(row, "data-row-col"), None):
+            continue
         profile = _first(row, "profile")
         name = _text(_first(profile, "name")) if profile else ""
 
@@ -544,6 +630,34 @@ FOLLOWUP_CAVEAT = (
 )
 
 
+def followup_note(notes):
+    """What the report can honestly say about follow-ups, given how the run went.
+
+    The caveat above is what a run that never opened a case has to admit. A run that
+    did open them says so instead — and still says it if some of them failed, because
+    "mostly complete" is the kind of thing that has to be on the page rather than in
+    someone's memory of how the run went.
+    """
+    opened = notes.get("opened", 0)
+    if not opened:
+        return FOLLOWUP_CAVEAT
+    note = (f"Follow-up dates were read from the {opened} case(s) that carry them, so a "
+            f"follow-up entered in this range on an older case IS included.")
+    if notes.get("skipped_after_range"):
+        note += (f" {notes['skipped_after_range']} case(s) starting after the range were "
+                 f"not opened — a follow-up is always later than its own case.")
+    if notes.get("failed"):
+        note += (f" ⚠ {notes['failed']} case(s) would not open and are counted by their "
+                 f"first date only.")
+    if notes.get("undated_cases"):
+        note += (f" ⚠ {notes['undated_cases']} case(s) opened with no readable date on "
+                 f"their encounter rows.")
+    if notes.get("hit_open_cap"):
+        note += (f" ⚠ Stopped after {MAX_CASE_OPENS} cases; the rest are counted by "
+                 f"their first date only.")
+    return note
+
+
 def _range_label(start, end):
     if start == end:
         return start.strftime("%m/%d/%Y")
@@ -563,7 +677,7 @@ def default_out_path(start, end, ext):
 # EXCEL
 # ─────────────────────────────────────────────
 
-def write_xlsx(rows, path, start, end, worksite=""):
+def write_xlsx(rows, path, start, end, worksite="", caveat=FOLLOWUP_CAVEAT):
     """Three sheets: the grouped read-it layout, a flat table, and the counts.
 
     "By date" is the report Dane asked for. "All rows" exists because a grouped
@@ -602,7 +716,7 @@ def write_xlsx(rows, path, start, end, worksite=""):
     bits.append(f"generated {datetime.now():%m/%d/%Y %H:%M}")
     ws["A3"] = "  |  ".join(bits)
     ws["A3"].font = sub_font
-    ws["A4"] = "! " + FOLLOWUP_CAVEAT
+    ws["A4"] = "! " + caveat
     ws["A4"].font = Font(size=10, bold=True, color="7D4104")
 
     r = 6                       # row 4 is the caveat, row 5 stays blank
@@ -689,7 +803,7 @@ def write_xlsx(rows, path, start, end, worksite=""):
     # rr is set explicitly, NOT carried out of the loop above: leaking the loop
     # variable put this caveat on top of "Dates with activity" the first time.
     rr = 8
-    sm.cell(rr, 1, "! " + FOLLOWUP_CAVEAT).font = Font(size=10, bold=True,
+    sm.cell(rr, 1, "! " + caveat).font = Font(size=10, bold=True,
                                                        color="7D4104")
     rr += 2
     if rows and not any((r.get("coaching_type") or "").strip() for r in rows):
@@ -730,7 +844,7 @@ def write_xlsx(rows, path, start, end, worksite=""):
 # WORD
 # ─────────────────────────────────────────────
 
-def write_docx(rows, path, start, end, worksite=""):
+def write_docx(rows, path, start, end, worksite="", caveat=FOLLOWUP_CAVEAT):
     """The same grouped layout as the "By date" sheet, as a document.
 
     Word gets the reading layout only — a flat table and a pivot belong in Excel, and
@@ -752,8 +866,8 @@ def write_docx(rows, path, start, end, worksite=""):
     bits.append(f"generated {datetime.now():%m/%d/%Y %H:%M}")
     tail = sub.add_run("\n" + "  |  ".join(bits))
     tail.font.size = Pt(9)
-    caveat = doc.add_paragraph()
-    warn = caveat.add_run("! " + FOLLOWUP_CAVEAT)
+    note_para = doc.add_paragraph()
+    warn = note_para.add_run("! " + caveat)
     warn.bold = True
     warn.font.size = Pt(9)
 
@@ -817,15 +931,16 @@ def newest_report(folder=None):
     return max(same_run, key=os.path.getmtime) if same_run else newest
 
 
-def write_report(rows, start, end, fmt="xlsx", worksite="", out=None):
+def write_report(rows, start, end, fmt="xlsx", worksite="", out=None,
+                 caveat=FOLLOWUP_CAVEAT):
     """Write the chosen format(s). Returns the list of paths written."""
     written = []
     if fmt in ("xlsx", "both"):
         p = out if (out and fmt != "both") else default_out_path(start, end, "xlsx")
-        written.append(write_xlsx(rows, p, start, end, worksite))
+        written.append(write_xlsx(rows, p, start, end, worksite, caveat))
     if fmt in ("docx", "both"):
         p = out if (out and fmt != "both") else default_out_path(start, end, "docx")
-        written.append(write_docx(rows, p, start, end, worksite))
+        written.append(write_docx(rows, p, start, end, worksite, caveat))
     return written
 
 
@@ -1526,6 +1641,98 @@ async def run_capture_case(specialist=""):
             await context.close()
 
 
+MAX_CASE_OPENS = 300          # a wall; the measured population of follow-up cases is 104
+
+
+async def resolve_follow_ups(page, rows, start, end):
+    """Open the cases whose real dates aren't on the list, and read them.
+
+    A case with follow-ups shows only its FIRST date on the Case List, so its later
+    encounters are invisible to a range filter. For those cases the summary page is
+    authoritative: its rows replace the list row entirely, which is also what stops the
+    original encounter being counted twice.
+
+    Which cases get opened, and why it is affordable:
+
+    * `follow_ups == 0` — the list row is the only encounter there is. Not opened.
+    * `follow_ups > 0` and the case's first date is **after** the range — a follow-up is
+      always later than the case it belongs to, so nothing on it can be in range. Not
+      opened.
+    * everything else — opened.
+
+    On the 2026-09-08 survey that was 104 cases out of 2,211.
+    """
+    from ati_coaching_encounter import BASE_URL, snap
+
+    plain = [r for r in rows if r.get("follow_ups", 0) <= 0]
+    todo = [r for r in rows
+            if r.get("follow_ups", 0) > 0 and r["date"] and r["date"] <= end
+            and r.get("href")]
+    skipped_future = sum(1 for r in rows if r.get("follow_ups", 0) > 0
+                         and r["date"] and r["date"] > end)
+
+    resolved, opened, failed, undated = [], 0, 0, 0
+    for i, row in enumerate(todo[:MAX_CASE_OPENS], 1):
+        try:
+            await page.goto(BASE_URL.rstrip("/") + row["href"])
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(900)
+            found = parse_case_encounters(await page.content())
+        except Exception as exc:
+            print(f"    case {i}/{len(todo)}: could not open ({type(exc).__name__})")
+            failed += 1
+            resolved.append(row)          # keep the list row rather than losing the case
+            continue
+        opened += 1
+        if not found:
+            resolved.append(row)
+            continue
+
+        # ⚠️ A summary whose rows carry no readable date must FALL BACK to the list row.
+        # Replacing a case with dateless encounters drops it out of the report entirely
+        # — worse than the caveat it was meant to fix, because the case's own original
+        # encounter disappears too. Keep the row, count it, and say so on the report.
+        if not any(e["date"] for e in found):
+            undated += 1
+            resolved.append(row)
+            if undated == 1:
+                await snap(page, "CASE_ERR_no_dates")
+                report = diagnose_dates(found, "a case summary page")
+                print("\n" + report)
+                try:
+                    path = os.path.join(_HERE, "debug", "CASE_dates_diagnosis.txt")
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(report + "\n")
+                    print(f"  Written to {path}")
+                except Exception as exc:
+                    print(f"  [diagnosis] could not write it: {exc}")
+            continue
+
+        for enc in found:
+            enc = dict(enc)
+            enc["name"] = row.get("name", "")
+            enc["case_id"] = row.get("case_id", "")
+            enc["extra"] = row.get("extra", "")
+            enc["extra_label"] = row.get("extra_label", "")
+            enc["href"] = row.get("href", "")
+            enc["follow_ups"] = row.get("follow_ups", 0)
+            enc["location"] = enc.get("location") or row.get("location", "")
+            resolved.append(enc)
+        if i % 10 == 0 or i == len(todo):
+            print(f"    opened {i}/{len(todo)} case(s) with follow-ups")
+
+    if len(todo) > MAX_CASE_OPENS:
+        for row in todo[MAX_CASE_OPENS:]:
+            resolved.append(row)
+
+    notes = {"with_follow_ups": len(todo) + skipped_future,
+             "opened": opened, "failed": failed, "undated_cases": undated,
+             "skipped_after_range": skipped_future,
+             "hit_open_cap": len(todo) > MAX_CASE_OPENS}
+    return plain + resolved, notes
+
+
 async def run_report(start, end, fmt="xlsx", out=None, open_when_done=True,
                      specialist=""):
     """Read the Case List and write the report. READ-ONLY.
@@ -1594,16 +1801,10 @@ async def run_report(start, end, fmt="xlsx", out=None, open_when_done=True,
                     "Tell Claude it's there.")
 
             all_rows, notes = await harvest(page, start, end)
+            print(f"\n  Reading the cases that carry follow-ups...")
+            all_rows, fu = await resolve_follow_ups(page, all_rows, start, end)
+            notes.update(fu)
             kept = filter_rows(all_rows, start, end)
-            # Rows carrying follow-ups hide their real dates behind the case's first
-            # one. Only ~5% of the list does (104 of 2,211, measured 2026-09-08), and
-            # only those get opened.
-            hidden = [r for r in all_rows
-                      if r.get("follow_ups", 0) > 0 and r["date"] and r["date"] <= end
-                      and not (start <= r["date"] <= end)]
-            notes["with_follow_ups"] = sum(1 for r in all_rows
-                                           if r.get("follow_ups", 0) > 0)
-            notes["hidden_candidates"] = len(hidden)
         finally:
             await context.close()
 
@@ -1621,14 +1822,15 @@ async def run_report(start, end, fmt="xlsx", out=None, open_when_done=True,
     for key in sorted(stats["by_case_type"]):
         print(f"    {stats['by_case_type'][key]:4d}  {key}")
 
-    paths = write_report(kept, start, end, fmt=fmt, worksite=site, out=out)
+    paths = write_report(kept, start, end, fmt=fmt, worksite=site, out=out,
+                         caveat=followup_note(notes))
     for path in paths:
         print(f"  Wrote {os.path.basename(path)}")
     if open_when_done and paths:
         # Open it BEFORE the dialog, so the file is already up when he clicks OK.
         open_file(paths[0])
 
-    warn = "\n\n! " + FOLLOWUP_CAVEAT
+    warn = "\n\n! " + followup_note(notes)
     if notes["undated"]:
         warn += f"\n\n⚠ {notes['undated']} row(s) had no readable date and were left out."
     if notes["hit_cap"]:

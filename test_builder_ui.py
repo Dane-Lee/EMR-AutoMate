@@ -352,6 +352,32 @@ ctx["save"]()
 check("clearing it takes the group back off", app.groups[idx]["pending"] is None)
 
 
+print("\nA dictated row takes its location from the roster (item 4, 2026-09-17)")
+# The dictation carries text and classification and NOTHING that locates a person --
+# that is half of what keeps it on the safe side of the boundary. So the row the builder
+# makes has to fetch dept/division/shift from the roster itself.
+drow = {"ref": "1", "coaching_type": "Safety Coaching", "details": [], "dropped": [],
+        "description": "EIS spoke with EE about the heat in their work area.",
+        "library": "", "group_size": 1}
+person = app.people[0]
+row = app._dictated_row(person["name"], drow)
+check("department and shift come off the roster, not the dictation",
+      row["department"] == person["dept"] and row["shift"] == person["shift"])
+check("encounter type and category come off the form",
+      row["encounter_type"] == app.etype_var.get()
+      and row["category"] == app.cat_var.get())
+check("the dictated type and text land unchanged",
+      row["coaching_type"] == "Safety Coaching"
+      and row["description"].startswith("EIS spoke"))
+check("the row is exactly the CSV's columns -- no extras, none missing",
+      set(row) == set(eb.ace.CSV_COLUMNS))
+
+app._add_dictated_row(row, drow["ref"])
+check("the ref rides in the batch label, so Review can be checked against his list",
+      "[dictated #1]" in app.groups[-1]["label"])
+check("the waiting count sits on the button itself",
+      "From dictation" in app.dictated_btn.cget("text"))
+
 app.destroy()
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: " + "; ".join(fails)))
 sys.exit(1 if fails else 0)

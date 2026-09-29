@@ -2,7 +2,9 @@
 
 Automation that enters Coaching Encounters into the ATI Worksite Solutions EMR, so
 Dane (an injury-prevention specialist) doesn't hand-type them. Python + Playwright
-drives a real browser; there are no AI/API calls anywhere in the runtime.
+drives a real browser and talks to nothing but the EMR. One optional step in the
+builder sends Dane's own de-identified description NOTES to a headless Claude; it never
+sends a name, a date or a department. None of it changes anything below.
 
 ## GitHub Copilot: do NOT accept PHI
 
@@ -62,8 +64,12 @@ only, never cell contents) or ask Dane. See `CLAUDE.md`.
 ## How a batch is built
 
 Dane checks names off the roster in `encounter_builder.py`, which can only emit values
-the EMR accepts; the automation enters them as drafts. There is no dictation and no AI
-in the pipeline. The old M365 Copilot intake was removed 2026-07-16 — don't
-reintroduce it.
+the EMR accepts; the automation enters them as drafts. There is no dictation in the
+pipeline. The old M365 Copilot intake was removed 2026-07-16 — don't reintroduce it.
+
+Since 2026-09-04 the builder can send a batch's description NOTES — Dane's own words,
+no names, no dates, no departments — to a headless Claude and paste the descriptions
+back. **That is not an opening for you.** You are still not cleared for PHI, and nothing
+about a de-identified note path changes what you may be shown.
 
 Full workflow: `WORKFLOW.md`.

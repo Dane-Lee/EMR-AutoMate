@@ -390,6 +390,69 @@ check("a name that isn't there matches nothing",
 check("an empty name matches nothing", cr.match_specialist("", OPTIONS) is None)
 
 
+# -- the case summary page and the follow-up pass --------------------------
+print(chr(10) + "FOLLOW-UP DATES OFF THE CASE SUMMARY PAGE")
+
+def _enc(label, value, chip, loc="Navarre"):
+    return (
+      '<div class="data-row">'
+      '<div class="data-row-cell"><p class="label text-ellipsis"></p>'
+      '<div class="chipButton"><div class="chipText">' + chip + '</div></div></div>'
+      '<div class="data-row-cell"><p class="label">' + label + '</p>'
+      '<p class="value">' + value + '</p></div>'
+      '<div class="data-row-cell"><p class="label">Provider Name</p>'
+      '<p class="value text-ellipsis">Lee, Dane</p></div>'
+      '<div class="data-row-cell"><p class="label">Location</p>'
+      '<p class="value text-ellipsis">' + loc + '</p></div>'
+      '<div class="data-row-cell width-25"><div><img src="/x.svg"></div></div>'
+      '</div>')
+
+SUMMARY = ('<div class="case-summary">'
+           + _enc("Date of Service", "Sep 02 2026", "PA")
+           + _enc("Date of Service", "Sep 09 2026", "FU")
+           + _enc("Date of Service", "Aug 12 2026", "FU")
+           + '</div>')
+
+enc = cr.parse_case_encounters(SUMMARY)
+check("every encounter row on the case is found", len(enc) == 3)
+check("each row carries its OWN date, not the case's first",
+      [e["date"] for e in enc] == [date(2026, 9, 2), date(2026, 9, 9), date(2026, 8, 12)])
+check("the type chip comes through", [e["case_type"] for e in enc] == ["PA", "FU", "FU"])
+check("location comes through", all(e["location"] == "Navarre" for e in enc))
+
+# This is the whole point: a follow-up entered inside the range on a case that STARTED
+# outside it. Filtering the Case List row alone would miss it entirely.
+in_range = cr.filter_rows(enc, date(2026, 9, 7), date(2026, 9, 13))
+check("!! a follow-up inside the range is found on a case that started outside it",
+      len(in_range) == 1 and in_range[0]["date"] == date(2026, 9, 9))
+
+# A Case List row must not be mistaken for a summary row -- both use class data-row and
+# are told apart only by their children.
+check("!! a Case List row is not read as a case-summary encounter",
+      cr.parse_case_encounters(FIXTURE) == [])
+check("...and a summary row is not read as a Case List row",
+      cr.parse_case_rows(SUMMARY) == [])
+
+# DOB protection carries to this page too.
+DOB_SUMMARY = ('<div class="case-summary">'
+               + _enc("DOB :", "Mar 04 1988", "PA") + '</div>')
+check("!! DOB on a summary row is never taken as the encounter date",
+      cr.parse_case_encounters(DOB_SUMMARY)[0]["date"] is None)
+
+print(chr(10) + "WHAT THE REPORT SAYS ABOUT FOLLOW-UPS")
+check("a run that opened nothing still admits the gap",
+      cr.followup_note({"opened": 0}) == cr.FOLLOWUP_CAVEAT)
+note = cr.followup_note({"opened": 12})
+check("a run that opened them says so instead",
+      "12" in note and "IS included" in note)
+check("failures are stated on the report, not just in the console",
+      "would not open" in cr.followup_note({"opened": 12, "failed": 3}))
+check("a dateless case summary is stated too",
+      "no readable date" in cr.followup_note({"opened": 12, "undated_cases": 1}))
+check("hitting the open cap is stated",
+      "Stopped after" in cr.followup_note({"opened": 300, "hit_open_cap": True}))
+
+
 # ── 10. names never reach stdout ────────────────────────────────────────────
 print("\nSTDOUT STAYS CLEAN")
 

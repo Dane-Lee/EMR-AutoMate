@@ -185,3 +185,6 @@ new_descriptions_for_library*.csv
 # the ref -> name cheat sheet lives, and that IS the re-identification key. Ignore
 # the whole directory: match on what the folder IS, not on one file's name.
 Encounter Work/
+
+# Local Claude Code permissions: its allowlist has held real names in saved grep patterns
+.claude/settings.json
